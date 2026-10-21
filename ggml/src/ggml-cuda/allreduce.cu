@@ -71,6 +71,9 @@ static __device__ __forceinline__ int ggml_cuda_ar_signal_get(const int * p) {
 // false-sharing stalls on the polling GPU.
 static constexpr size_t GGML_CUDA_AR_ARRIVAL_STRIDE = 64;
 
+// Pre-Volta spin backoff in SM clock cycles, in place of __nanosleep(100) (~100 ns at 1328 MHz).
+static constexpr long long GGML_CUDA_AR_SPIN_BACKOFF_CYCLES = 128;
+
 // Number of blocks the chunked kernel launches with.  Each block stripes a
 // disjoint slice of the data and synchronizes through its own arrival-token
 // slot so multiple SMs can pump PCIe stores in parallel.
@@ -168,7 +171,10 @@ static __global__ void ggml_cuda_ar_kernel(
 #elif __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
             __nanosleep(100);
 #else
-            NO_DEVICE_CODE;
+            // Pascal has no __nanosleep: back off with a clock64() loop so polling does not flood PCIe
+            const long long t_wait_0 = clock64();
+            while (clock64() - t_wait_0 < GGML_CUDA_AR_SPIN_BACKOFF_CYCLES) {
+            }
 #endif // GGML_USE_HIP
         }
     }
@@ -405,14 +411,14 @@ ggml_cuda_ar_pipeline * ggml_cuda_ar_pipeline_init(const int * devices, size_t n
         return nullptr;
     }
 
-    // The chunked kernel uses __nanosleep (NVIDIA, sm70+) or
+    // The chunked kernel uses __nanosleep (NVIDIA, sm70+), a clock64() loop (Pascal) or
     // __builtin_amdgcn_s_sleep (AMD).
     for (size_t i = 0; i < n_devices; ++i) {
         const int cc = ggml_cuda_info().devices[devices[i]].cc;
-        if (cc < GGML_CUDA_CC_VOLTA) {
+        if (cc < GGML_CUDA_CC_PASCAL) {
             GGML_LOG_DEBUG("%s: internal AllReduce requires compute capability >= %d "
                            "(device %d has cc=%d); falling back\n",
-                           __func__, GGML_CUDA_CC_VOLTA, devices[i], cc);
+                           __func__, GGML_CUDA_CC_PASCAL, devices[i], cc);
             return nullptr;
         }
     }
