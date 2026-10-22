@@ -1485,16 +1485,27 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
     // compact causal mask (OPTLOG 248) gave that back: GPU0 min free at 262k, vision, -ub 2048: 656 MiB
     static const int chunk_env  = ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_CHUNK", 2048);
     static const int nsplit_env = ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_SPLIT", 2);
-    const int64_t nsplit = std::max(1, std::min(8, nsplit_env));
+    // P holds C keys x N rows for every virtual head. The LLM shapes (1-2 KV heads per GPU) stay far below
+    // the cap; full self-attention over many heads does not (Wan 5B, 24 heads x 27280 tokens: 5.4 GB at the
+    // defaults). Over the cap: one split (the heads already fill the GPU), then fewer keys per chunk.
+    // 1024 keys, one split measured as fast as the defaults there (45.6 s per step either way).
+    static const int64_t scratch_cap = (int64_t) ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_SCRATCH_MB", 1408) << 20;
+    const int64_t Npad = (N + BN - 1)/BN*BN;
+    int64_t nsplit = std::max(1, std::min(8, nsplit_env));
+    int64_t chunk  = std::min(chunk_env, MAXTILE*TK);
+    if ((int64_t) sizeof(half)*chunk*Npad*nhkv*nsplit > scratch_cap) {
+        nsplit = 1;
+        chunk  = std::min<int64_t>(chunk, scratch_cap/((int64_t) sizeof(half)*Npad*nhkv)/TK*TK);
+    }
     const int64_t Lsp = ((nkv + nsplit - 1)/nsplit + TK - 1)/TK*TK;   // keys per split
-    const int64_t C = std::max<int64_t>(TK, (std::min<int64_t>(std::min(chunk_env, MAXTILE*TK), Lsp) + TK - 1)/TK*TK);
+    const int64_t C = std::max<int64_t>(TK, (std::min<int64_t>(chunk, Lsp) + TK - 1)/TK*TK);
     const int64_t nz = nhkv*nsplit;   // virtual heads
 
     ggml_cuda_pool & pool = ctx.pool();
     ggml_cuda_pool_alloc<half>  Qf16(pool, D*N*nhkv);
     ggml_cuda_pool_alloc<half>  K16(pool, D*C*nz);
     ggml_cuda_pool_alloc<half2> Vp(pool, DV*(C/2)*nz);
-    ggml_cuda_pool_alloc<half>  P(pool, C*((N + BN - 1)/BN*BN)*nz);
+    ggml_cuda_pool_alloc<half>  P(pool, C*Npad*nz);
     ggml_cuda_pool_alloc<float> mt(pool, (C/TK)*N*nz);
     ggml_cuda_pool_alloc<float> lt(pool, (C/TK)*N*nz);
     ggml_cuda_pool_alloc<float> O(pool, DV*N*nz);
