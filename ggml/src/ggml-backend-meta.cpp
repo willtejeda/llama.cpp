@@ -6,15 +6,20 @@
 #include "ggml-cpp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1813,6 +1818,84 @@ static ggml_guid_t ggml_backend_meta_guid() {
     return &guid;
 }
 
+// Issues one simple backend's share of each subgraph from its own host thread, so the launch work for
+// several devices overlaps instead of running back to back on the calling thread.
+struct ggml_backend_meta_issue_worker {
+    std::thread             thread;
+    std::mutex              mtx;
+    std::condition_variable cv;
+    std::atomic<uint64_t>   n_req{0};
+    std::atomic<uint64_t>   n_done{0};
+    std::atomic<bool>       sleeping{false};
+    std::atomic<bool>       stop{false};
+    ggml_backend_t          backend = nullptr;
+    ggml_cgraph *           cgraph  = nullptr;
+    ggml_status             status  = GGML_STATUS_SUCCESS;
+
+    static void relax() {
+#if defined(__x86_64__) || defined(_M_X64)
+        __builtin_ia32_pause();
+#endif
+    }
+
+    // started in the body so every member above is constructed before run() touches it
+    ggml_backend_meta_issue_worker() {
+        thread = std::thread([this] { run(); });
+    }
+
+    ~ggml_backend_meta_issue_worker() {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            stop.store(true);
+            n_req.fetch_add(1);
+        }
+        cv.notify_one();
+        thread.join();
+    }
+
+    void run() {
+        uint64_t seen = 0;
+        while (true) {
+            // spin while jobs arrive back to back (decode), sleep when idle
+            for (int spins = 0; n_req.load(std::memory_order_acquire) == seen; ) {
+                if (++spins < 20000) {
+                    relax();
+                    continue;
+                }
+                std::unique_lock<std::mutex> lock(mtx);
+                sleeping.store(true);
+                cv.wait(lock, [&] { return n_req.load() != seen; });
+                sleeping.store(false);
+                spins = 0;
+            }
+            if (stop.load()) {
+                return;
+            }
+            seen   = n_req.load(std::memory_order_acquire);
+            status = ggml_backend_graph_compute_async(backend, cgraph);
+            n_done.store(seen, std::memory_order_release);
+        }
+    }
+
+    void submit(ggml_backend_t b, ggml_cgraph * g) {
+        backend = b;
+        cgraph  = g;
+        n_req.fetch_add(1);
+        if (sleeping.load()) {
+            std::lock_guard<std::mutex> lock(mtx);
+            cv.notify_one();
+        }
+    }
+
+    ggml_status wait() {
+        const uint64_t target = n_req.load(std::memory_order_relaxed);
+        while (n_done.load(std::memory_order_acquire) != target) {
+            relax();
+        }
+        return status;
+    }
+};
+
 struct ggml_backend_meta_context {
     struct cgraph_config {
         ggml_cgraph * cgraph_main = nullptr;
@@ -1846,6 +1929,9 @@ struct ggml_backend_meta_context {
     void *                               comm_ctx       = nullptr;
     ggml_backend_comm_allreduce_tensor_t comm_allreduce = nullptr;
 
+    // one issue thread per simple backend after the first; empty when disabled (GGML_META_PARALLEL_ISSUE=0)
+    std::vector<std::unique_ptr<ggml_backend_meta_issue_worker>> issue_workers;
+
     ggml_backend_meta_context(ggml_backend_dev_t meta_dev, const char * params) {
         const size_t n_devs = ggml_backend_meta_dev_n_devs(meta_dev);
         n_reduce_steps = std::ceil(std::log2(n_devs));
@@ -1877,9 +1963,17 @@ struct ggml_backend_meta_context {
                     ggml_backend_get_device(simple_backends[0])), "ggml_backend_comm_allreduce_tensor");
             GGML_ASSERT(comm_allreduce != nullptr);
         }
+
+        const char * parallel_issue = getenv("GGML_META_PARALLEL_ISSUE");
+        if (n_devs > 1 && (parallel_issue == nullptr || atoi(parallel_issue) != 0)) {
+            for (size_t i = 1; i < n_devs; i++) {
+                issue_workers.emplace_back(new ggml_backend_meta_issue_worker());
+            }
+        }
     }
 
     ~ggml_backend_meta_context() {
+        issue_workers.clear();
         if (comm_ctx != nullptr) {
             ggml_backend_comm_free_t comm_free = (ggml_backend_comm_free_t) ggml_backend_reg_get_proc_address(
                 ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_configs[0].backend)), "ggml_backend_comm_free");
@@ -2477,11 +2571,29 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
 
 
     for (size_t i = 0; i < backend_ctx->n_subgraphs; i++) {
-        for (size_t j = 0; j < n_backends; j++) {
-            auto & bcj = backend_ctx->backend_configs[j];
-            const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
+        if (!backend_ctx->issue_workers.empty()) {
+            for (size_t j = 1; j < n_backends; j++) {
+                auto & bcj = backend_ctx->backend_configs[j];
+                backend_ctx->issue_workers[j - 1]->submit(bcj.backend, bcj.cgraphs[i].cgraph_main);
+            }
+            auto & bc0 = backend_ctx->backend_configs[0];
+            ggml_status status = ggml_backend_graph_compute_async(bc0.backend, bc0.cgraphs[i].cgraph_main);
+            for (size_t j = 1; j < n_backends; j++) {
+                const ggml_status status_j = backend_ctx->issue_workers[j - 1]->wait();
+                if (status_j != GGML_STATUS_SUCCESS) {
+                    status = status_j;
+                }
+            }
             if (status != GGML_STATUS_SUCCESS) {
                 return status;
+            }
+        } else {
+            for (size_t j = 0; j < n_backends; j++) {
+                auto & bcj = backend_ctx->backend_configs[j];
+                const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
+                if (status != GGML_STATUS_SUCCESS) {
+                    return status;
+                }
             }
         }
 
