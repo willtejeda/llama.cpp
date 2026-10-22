@@ -2128,8 +2128,16 @@ static bool ggml_cuda_mul_mat_is_cublas_f16(ggml_backend_cuda_context & ctx, con
             return false; // (the transposed-vector case; conservatively without its remaining conditions)
         }
         if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, ne11, /*mul_mat_id =*/ false) ||
-            ggml_cuda_should_use_mmvq(src0->type, cc, ne11) ||
-            ggml_cuda_should_use_mmq(src0->type, cc, ne11, /*n_experts =*/ 0)) {
+            ggml_cuda_should_use_mmvq(src0->type, cc, ne11)) {
+            return false;
+        }
+        // the Pascal 9..16-column fp16 matvec (a 13-token text batch after an image took it, the fold never
+        // ran, and the skipped SwiGLU was left pending)
+        if (ne11 > MMVQ_MAX_BATCH_SIZE && !ggml_cuda_gemm_fold_wants_f32(ctx, src0, src1, dst) &&
+            ggml_cuda_mmvq_f16_supported(src0, src1, dst, ne11)) {
+            return false;
+        }
+        if (ggml_cuda_should_use_mmq(src0->type, cc, ne11, /*n_experts =*/ 0)) {
             return false;
         }
     }
@@ -5395,7 +5403,18 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 cuda_ctx->xchg_want = false;
                 const bool fold_partner_done = ggml_cuda_gemm_fold_take_partner_done();
                 if (glu_mm) {
-                    GGML_ASSERT(!ggml_cuda_gemm_fold_glu_pending());
+                    if (ggml_cuda_gemm_fold_glu_pending()) {
+                        // the matmul took another path after all (ggml_cuda_mul_mat_is_cublas_f16 out of step
+                        // with ggml_cuda_mul_mat): run the skipped SwiGLU, then the matmul again on its output
+                        static bool warned = false;
+                        if (!warned) {
+                            GGML_LOG_WARN("%s: %s did not take the fold GEMM; recomputing it after its SwiGLU\n", __func__, node->name);
+                            warned = true;
+                        }
+                        ggml_cuda_gemm_fold_set_glu(nullptr);
+                        ok = ggml_cuda_compute_forward(*cuda_ctx, cgraph->nodes[i - 1]) &&
+                             ggml_cuda_compute_forward(*cuda_ctx, node);
+                    }
                     fold_glu_mm = nullptr;
                 }
                 if (!ok) {

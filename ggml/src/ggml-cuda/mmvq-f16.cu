@@ -2944,6 +2944,10 @@ static bool mmvq_f16_shape_ok(const ggml_tensor * src0, const ggml_tensor * src1
             (src1->nb[1] % 16) != 0 || ((uintptr_t) src1->data % 16) != 0 || ((uintptr_t) src0->data % 4) != 0);
 }
 
+bool ggml_cuda_mmvq_f16_supported(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst, const int64_t ncols) {
+    return mmvq_f16_shape_ok(src0, src1, dst, ncols);
+}
+
 static void mmvq_f16_prepare(ggml_backend_cuda_context & ctx, const ggml_tensor * src1, const int64_t ncols, const int64_t K,
                              __half ** xs_out, float ** sc_out) {
     const int nw = (int) ((K + MMVQ_F16_WIN - 1)/MMVQ_F16_WIN);

@@ -9,6 +9,9 @@
 bool ggml_cuda_mmvq_f16_try(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1,
                             ggml_tensor * dst, int64_t ncols);
 
+// Whether ggml_cuda_mmvq_f16_try would take this shape (for callers that must predict the matmul's path).
+bool ggml_cuda_mmvq_f16_supported(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst, int64_t ncols);
+
 // The gated delta net's alpha and beta matvecs (same activation, 2..16 columns, < 256 rows together)
 // with the gate softplus(alpha + b) * m and sigmoid(beta) applied in the epilogue, in one launch.
 // Bit-identical to MUL_MAT, ADD, SOFTPLUS, MUL, MUL_MAT, SIGMOID. GGML_CUDA_FUSE_GDN_GATE=0 disables.
