@@ -58,6 +58,13 @@ struct fattn_gemm_mask_view {
 
 static fattn_gemm_mask_view fattn_gemm_mask_get(const ggml_tensor * mask, const int64_t nt, const int64_t nkv,
         ggml_cuda_pool_alloc<half> & stair, cudaStream_t stream) {
+    // No mask (e.g. the video DiTs' full self-attention): one row of nkv zeros, read with row
+    // stride 0. Its first nonzero column is nkv for every query, so the kernels never apply it.
+    if (mask == nullptr) {
+        stair.alloc(nkv);
+        CUDA_CHECK(cudaMemsetAsync(stair.get(), 0, nkv*sizeof(half), stream));
+        return { stair.get(), 0 };
+    }
     if (mask->type != GGML_TYPE_I32) {
         return { (const half *) mask->data, (int64_t) (mask->nb[1]/sizeof(half)) };
     }
@@ -1504,7 +1511,7 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
     const int64_t s_mask = mview.s;
     // compact mask: every row is a prefix, so fully masked tiles may be skipped (GGML_CUDA_FA_PREFIX_SKIP=0: off)
     static const bool prefix_env = ggml_cuda_fa_fold_env("GGML_CUDA_FA_PREFIX_SKIP", 1) != 0;
-    const bool prefix = prefix_env && mask->type == GGML_TYPE_I32;
+    const bool prefix = prefix_env && mask && mask->type == GGML_TYPE_I32;
 
     fattn_gemm_mask_first_nz<256><<<nt, 256, 0, stream>>>(mview.data, mask_first.ptr, s_mask, (int) nkv);
     CUDA_CHECK(cudaGetLastError());
@@ -1713,7 +1720,7 @@ bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
-    if (!mask || sinks) {
+    if (sinks) {
         return false;
     }
     if (Q->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
@@ -1742,7 +1749,7 @@ bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
     // nb33*(sequence % ne33) (fattn-tile.cuh:860); this path has no equivalent, so a mask
     // that is not broadcast across heads and sequences would silently be read from
     // sequence 0 for every sequence. Decline those shapes and let the tile kernel take them.
-    if (mask->ne[2] != 1 || mask->ne[3] != 1) {
+    if (mask && (mask->ne[2] != 1 || mask->ne[3] != 1)) {
         return false;
     }
     // F16 needs no conversion at all (cuBLAS takes an arbitrary lda, so we point it straight
