@@ -716,6 +716,11 @@ static std::condition_variable ggml_cuda_lock_cv;
 static std::atomic<int> ggml_cuda_lock_counter;
 
 ggml_backend_cuda_context::~ggml_backend_cuda_context() {
+    if (gdn_idx_buf != nullptr) {
+        ggml_cuda_set_device(device);
+        CUDA_CHECK(cudaFree(gdn_idx_buf));
+        gdn_idx_buf = nullptr;
+    }
     for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
         if (mmvq_q8_1_ptr[i] != nullptr) {
             ggml_cuda_set_device(i);
@@ -3973,7 +3978,7 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
 // GET_ROWS that gathers recurrent states whose only consumer, through reshape views, is a gated delta
 // net's state input: skip it and let the kernel read the rows in place (gated_delta_net.cuh).
 // GGML_CUDA_GDN_GATHER=0 turns it off.
-static bool ggml_cuda_try_gdn_state_gather(const ggml_cgraph * cgraph, int i) {
+static bool ggml_cuda_try_gdn_state_gather(ggml_backend_cuda_context & ctx, const ggml_cgraph * cgraph, int i) {
     static const bool enabled = [] {
         const char * s = getenv("GGML_CUDA_GDN_GATHER");
         return !s || atoi(s) != 0;
@@ -4045,8 +4050,38 @@ static bool ggml_cuda_try_gdn_state_gather(const ggml_cgraph * cgraph, int i) {
     if (gdn == nullptr) {
         return false;
     }
-    ggml_cuda_gdn_gather_register(gdn, (const float *) node->src[0]->data, (const int32_t *) node->src[1]->data,
-                                  node->src[0]->nb[1] / sizeof(float));
+    // The cache rows (src0) persist; the index (src1) may not outlive this node's slot in the graph, so the
+    // kernel reads a copy taken here, in stream order. The index tensor's contents are fixed for the whole
+    // graph, so one copy serves every layer that gathers through it.
+    for (int k = 0; k < ctx.gdn_idx_nsrc; ++k) {
+        if (ctx.gdn_idx_src[k] == node->src[1]) {
+            ggml_cuda_gdn_gather_register(gdn, (const float *) node->src[0]->data, ctx.gdn_idx_dst[k],
+                                          node->src[0]->nb[1] / sizeof(float));
+            return true;
+        }
+    }
+    constexpr int idx_cap = 512;
+    const int64_t n_idx = node->src[1]->ne[0];
+    if (ctx.gdn_idx_used + n_idx > idx_cap) {
+        return false;
+    }
+    if (ctx.gdn_idx_buf == nullptr) {
+        cudaStreamCaptureStatus capturing = cudaStreamCaptureStatusNone;
+        CUDA_CHECK(cudaStreamIsCapturing(ctx.stream(), &capturing));
+        if (capturing != cudaStreamCaptureStatusNone) {
+            return false; // no allocation during capture; the next uncaptured graph allocates it
+        }
+        CUDA_CHECK(cudaMalloc(&ctx.gdn_idx_buf, idx_cap*sizeof(int32_t)));
+    }
+    int32_t * idx = ctx.gdn_idx_buf + ctx.gdn_idx_used;
+    ctx.gdn_idx_used += (int) n_idx;
+    CUDA_CHECK(cudaMemcpyAsync(idx, node->src[1]->data, n_idx*sizeof(int32_t), cudaMemcpyDefault, ctx.stream()));
+    if (ctx.gdn_idx_nsrc < 8) {
+        ctx.gdn_idx_src[ctx.gdn_idx_nsrc] = node->src[1];
+        ctx.gdn_idx_dst[ctx.gdn_idx_nsrc] = idx;
+        ctx.gdn_idx_nsrc++;
+    }
+    ggml_cuda_gdn_gather_register(gdn, (const float *) node->src[0]->data, idx, node->src[0]->nb[1] / sizeof(float));
     return true;
 }
 
@@ -5329,7 +5364,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
                 const bool known_no_fuse = fce_valid && fce->no_fuse[i];
 
-                if (!known_no_fuse && node->op == GGML_OP_GET_ROWS && ggml_cuda_try_gdn_state_gather(cgraph, i)) {
+                if (!known_no_fuse && node->op == GGML_OP_GET_ROWS && ggml_cuda_try_gdn_state_gather(*cuda_ctx, cgraph, i)) {
                     continue; // the gated delta net reads the rows in place
                 }
 
@@ -5515,6 +5550,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     cuda_ctx->mmvq_q8_1_invalidate();
     ggml_cuda_mmvq_f16_invalidate(*cuda_ctx);
     ggml_cuda_gdn_gather_reset();
+    cuda_ctx->gdn_idx_used = 0;
+    cuda_ctx->gdn_idx_nsrc = 0;
     cuda_ctx->xchg.data = nullptr;
 
     ggml_cuda_set_device(cuda_ctx->device);
