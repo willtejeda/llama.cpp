@@ -411,13 +411,16 @@ ggml_cuda_ar_pipeline * ggml_cuda_ar_pipeline_init(const int * devices, size_t n
     // spins instead; it takes this path only when the two GPUs cannot reach
     // each other directly (no P2P, e.g. one card behind the chipset), where
     // the alternative is a driver-staged cudaMemcpyPeer per exchange.
+    // p100k: peer access is only enabled with GGML_CUDA_P2P (ggml_cuda_init), so a board whose driver reports
+    // P2P but runs without it (ours: peer copies corrupt data) stages its exchanges the same way and qualifies too.
+    const bool p2p_enabled = getenv("GGML_CUDA_P2P") != nullptr;
     bool pascal_no_p2p = n_devices == 2 && devices[0] != devices[1];
     for (size_t i = 0; i < n_devices && pascal_no_p2p; ++i) {
         const int cc = ggml_cuda_info().devices[devices[i]].cc;
         int can = 0;
         CUDA_CHECK(cudaDeviceCanAccessPeer(&can, ggml_cuda_info().devices[devices[i]].physical_device,
                                            ggml_cuda_info().devices[devices[1 - i]].physical_device));
-        pascal_no_p2p = cc >= GGML_CUDA_CC_PASCAL && cc < GGML_CUDA_CC_VOLTA && !can &&
+        pascal_no_p2p = cc >= GGML_CUDA_CC_PASCAL && cc < GGML_CUDA_CC_VOLTA && (!can || !p2p_enabled) &&
                         ggml_cuda_info().devices[devices[0]].physical_device != ggml_cuda_info().devices[devices[1]].physical_device;
     }
     if (const char * env = getenv("GGML_CUDA_AR_HOST")) {

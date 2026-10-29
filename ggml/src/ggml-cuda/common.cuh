@@ -1542,6 +1542,18 @@ struct ggml_backend_cuda_context {
     // graph's last node; the fold GEMM then runs it in token chunks, recording ev[c] after chunk c,
     // so the tensor-parallel all-reduce can send chunk c while later chunks still compute.
     bool xchg_want = false;
+
+    // Row indices of this graph's skipped recurrent-state gathers (ggml_cuda_try_gdn_state_gather), copied out
+    // of the gather's index tensor: that is often the scheduler's per-split input copy, whose memory the
+    // allocator may hand to another tensor before the delta net reads it (every layer is its own split once
+    // MoE experts run on the CPU).
+    int32_t * gdn_idx_buf  = nullptr;
+    int       gdn_idx_used = 0;
+    // index tensors already copied this graph and where to (with layer split every delta-net layer of a
+    // split shares one index tensor, so it is copied once)
+    const ggml_tensor * gdn_idx_src[8] = {};
+    int32_t *           gdn_idx_dst[8] = {};
+    int                 gdn_idx_nsrc   = 0;
     struct {
         const void * data = nullptr;
         int          n    = 0;
