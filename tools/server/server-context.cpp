@@ -1541,6 +1541,14 @@ private:
                 const char * e = getenv("LLAMA_SPEC_PAD");
                 return !e || atoi(e) != 0;
             }();
+            // a verify wider than the matvec batch (8) takes the batched matmul for every draft:
+            // with ngram-mod (n_max 64) that dequantizes every weight on each step (P100, Q4_K:
+            // Nanbeige 33B fresh decode 33.5 -> 1.8 t/s), so pad only short drafts such as MTP's
+            const int32_t spec_n_max = common_speculative_n_max(&params_base.speculative);
+            if (spec_pad && spec_n_max + 1 > 8) {
+                SRV_INF("fixed-width verify off: drafts of up to %d tokens are wider than the matvec batch\n", spec_n_max);
+                spec_pad = false;
+            }
             params_base.speculative.draft.pad_verify = spec_pad;
             try {
                 spec.reset(common_speculative_init(params_base.speculative, params_base.n_parallel));
