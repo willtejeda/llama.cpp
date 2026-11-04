@@ -625,11 +625,14 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     if (kv_only && n_outputs == 0) {
         ggml_tensor * k_st = Kcur;
         ggml_tensor * v_st = Vcur;
-        if (inp_attn->self_k_rot) {
-            k_st = llama_mul_mat_hadamard(ctx0, k_st, inp_attn->self_k_rot);
+        // per-layer rotation constants (upstream #31073 keeps one per layer, on that layer's device)
+        ggml_tensor * k_rot = (size_t) il < inp_attn->self_k_rot.size() ? inp_attn->self_k_rot[il] : nullptr;
+        ggml_tensor * v_rot = (size_t) il < inp_attn->self_v_rot.size() ? inp_attn->self_v_rot[il] : nullptr;
+        if (k_rot) {
+            k_st = llama_mul_mat_hadamard(ctx0, k_st, k_rot);
         }
-        if (inp_attn->self_v_rot) {
-            v_st = llama_mul_mat_hadamard(ctx0, v_st, inp_attn->self_v_rot);
+        if (v_rot) {
+            v_st = llama_mul_mat_hadamard(ctx0, v_st, v_rot);
         }
         ggml_build_forward_expand(gf, v_st);
         ggml_build_forward_expand(gf, k_st);
