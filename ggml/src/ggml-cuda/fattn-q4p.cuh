@@ -231,6 +231,7 @@ static __global__ void flash_attn_ext_q4p(
         const char * __restrict__ mask,
         const char * __restrict__ sinks,
         const int  * __restrict__ KV_max,
+        const int  * __restrict__ KV_rows, // unused: q4p is never chosen with kv_rows
         float      * __restrict__ dst,
         float2     * __restrict__ dst_meta,
         const float scale,
@@ -247,6 +248,7 @@ static __global__ void flash_attn_ext_q4p(
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33) {
     ggml_cuda_pdl_lc();
+    GGML_UNUSED(KV_rows);
 #if defined(FLASH_ATTN_AVAILABLE) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     constexpr int D = FATTN_Q4P_D;
     constexpr int R = ncols1*ncols2;
@@ -1196,6 +1198,9 @@ static bool ggml_cuda_fattn_q4p_supported(const ggml_tensor * dst) {
         return !s || atoi(s) != 0;
     }();
     if (!enabled) {
+        return false;
+    }
+    if (dst->src[5] != nullptr) { // kv_rows (flash_attn_ext_rows): K/V columns are not the cells
         return false;
     }
     const ggml_tensor * Q     = dst->src[0];
