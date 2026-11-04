@@ -186,6 +186,10 @@ static void server_register_routes(server_http_context & ctx_http, server_routes
     ctx_http.post("/v1/audio/transcriptions",  ex_wrapper(routes.post_transcriptions_oai));
     ctx_http.post("/audio/transcriptions",     ex_wrapper(routes.post_transcriptions_oai));
     ctx_http.post("/tts",                      ex_wrapper(routes.post_tts));
+    // OpenAI path for the same handler (it already reads "input", "voice", "response_format"), so OpenAI clients
+    // and routers that route /v1/audio/speech by model reach it
+    ctx_http.post("/v1/audio/speech",          ex_wrapper(routes.post_tts));
+    ctx_http.post("/audio/speech",             ex_wrapper(routes.post_tts));
     ctx_http.ws  ("/v1/realtime",              routes.ws_realtime);
     ctx_http.post("/v1/messages",              ex_wrapper(routes.post_anthropic_messages)); // anthropic messages API
     ctx_http.post("/infill",                   ex_wrapper(routes.post_infill));
