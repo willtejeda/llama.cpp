@@ -13181,6 +13181,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     // asymmetric head_dim (hsk != hsv) with one or both sides not 64-aligned
     test_cases.emplace_back(new test_flash_attn_ext(72, 64, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+    // long-sequence attention at or above GGML_CUDA_FA_GEMM_MINKV (Pascal GEMM path: cuBLAS for F16, fold for
+    // Q8_0), with and without a mask: the video DiTs' self-attention passes none
+    for (bool mask : {true, false}) {
+        for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
+            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 4, {1, 1}, 4096, 128, mask, false, 0, 0, GGML_PREC_F32, type_KV, type_KV));
+        }
+    }
     // prefill attention of this model per GPU under -sm tensor: D 256, 2 KV heads, GQA 6, q4_0 cache
     for (int64_t nb : {128, 256, 320, 384, 448, 512}) {
         for (int64_t kv : {256, 512, 768, 1024}) {

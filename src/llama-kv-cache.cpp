@@ -2052,7 +2052,10 @@ void llama_kv_cache::set_input_attn_mask(const llm_attn_mask & attn_mask, const 
 
 bool llama_kv_cache::kq_mask_compact_static() const {
     static const bool on = [] { const char * e = getenv("LLAMA_KQ_MASK_COMPACT"); return !e || atoi(e) != 0; }();
-    return on && n_seq_max == 1 && swa_type == LLAMA_SWA_TYPE_NONE && !hparams.use_alibi && v_cells.size() == 1;
+    // models with a top-k indexer (QSA / DSA sparse attention, e.g. qwen4exp) build their attention mask from the
+    // full [n_kv, n_tokens] mask (build_fused_top_k_mask, ggml_fill), which the compact prefix form cannot feed
+    return on && n_seq_max == 1 && swa_type == LLAMA_SWA_TYPE_NONE && !hparams.use_alibi && v_cells.size() == 1 &&
+        hparams.indexer_n_head == 0 && hparams.indexer_top_k == 0;
 }
 
 bool llama_kv_cache::kq_mask_prefix(const llama_ubatch * ubatch, uint32_t n_kv, bool causal_attn, int32_t * L) const {

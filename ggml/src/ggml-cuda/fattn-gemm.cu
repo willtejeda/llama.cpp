@@ -58,6 +58,13 @@ struct fattn_gemm_mask_view {
 
 static fattn_gemm_mask_view fattn_gemm_mask_get(const ggml_tensor * mask, const int64_t nt, const int64_t nkv,
         ggml_cuda_pool_alloc<half> & stair, cudaStream_t stream) {
+    // No mask (e.g. the video DiTs' full self-attention): one row of nkv zeros, read with row
+    // stride 0. Its first nonzero column is nkv for every query, so the kernels never apply it.
+    if (mask == nullptr) {
+        stair.alloc(nkv);
+        CUDA_CHECK(cudaMemsetAsync(stair.get(), 0, nkv*sizeof(half), stream));
+        return { stair.get(), 0 };
+    }
     if (mask->type != GGML_TYPE_I32) {
         return { (const half *) mask->data, (int64_t) (mask->nb[1]/sizeof(half)) };
     }
@@ -1478,16 +1485,27 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
     // compact causal mask (OPTLOG 248) gave that back: GPU0 min free at 262k, vision, -ub 2048: 656 MiB
     static const int chunk_env  = ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_CHUNK", 2048);
     static const int nsplit_env = ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_SPLIT", 2);
-    const int64_t nsplit = std::max(1, std::min(8, nsplit_env));
+    // P holds C keys x N rows for every virtual head. The LLM shapes (1-2 KV heads per GPU) stay far below
+    // the cap; full self-attention over many heads does not (Wan 5B, 24 heads x 27280 tokens: 5.4 GB at the
+    // defaults). Over the cap: one split (the heads already fill the GPU), then fewer keys per chunk.
+    // 1024 keys, one split measured as fast as the defaults there (45.6 s per step either way).
+    static const int64_t scratch_cap = (int64_t) ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_SCRATCH_MB", 1408) << 20;
+    const int64_t Npad = (N + BN - 1)/BN*BN;
+    int64_t nsplit = std::max(1, std::min(8, nsplit_env));
+    int64_t chunk  = std::min(chunk_env, MAXTILE*TK);
+    if ((int64_t) sizeof(half)*chunk*Npad*nhkv*nsplit > scratch_cap) {
+        nsplit = 1;
+        chunk  = std::min<int64_t>(chunk, scratch_cap/((int64_t) sizeof(half)*Npad*nhkv)/TK*TK);
+    }
     const int64_t Lsp = ((nkv + nsplit - 1)/nsplit + TK - 1)/TK*TK;   // keys per split
-    const int64_t C = std::max<int64_t>(TK, (std::min<int64_t>(std::min(chunk_env, MAXTILE*TK), Lsp) + TK - 1)/TK*TK);
+    const int64_t C = std::max<int64_t>(TK, (std::min<int64_t>(chunk, Lsp) + TK - 1)/TK*TK);
     const int64_t nz = nhkv*nsplit;   // virtual heads
 
     ggml_cuda_pool & pool = ctx.pool();
     ggml_cuda_pool_alloc<half>  Qf16(pool, D*N*nhkv);
     ggml_cuda_pool_alloc<half>  K16(pool, D*C*nz);
     ggml_cuda_pool_alloc<half2> Vp(pool, DV*(C/2)*nz);
-    ggml_cuda_pool_alloc<half>  P(pool, C*((N + BN - 1)/BN*BN)*nz);
+    ggml_cuda_pool_alloc<half>  P(pool, C*Npad*nz);
     ggml_cuda_pool_alloc<float> mt(pool, (C/TK)*N*nz);
     ggml_cuda_pool_alloc<float> lt(pool, (C/TK)*N*nz);
     ggml_cuda_pool_alloc<float> O(pool, DV*N*nz);
@@ -1504,7 +1522,7 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
     const int64_t s_mask = mview.s;
     // compact mask: every row is a prefix, so fully masked tiles may be skipped (GGML_CUDA_FA_PREFIX_SKIP=0: off)
     static const bool prefix_env = ggml_cuda_fa_fold_env("GGML_CUDA_FA_PREFIX_SKIP", 1) != 0;
-    const bool prefix = prefix_env && mask->type == GGML_TYPE_I32;
+    const bool prefix = prefix_env && mask && mask->type == GGML_TYPE_I32;
 
     fattn_gemm_mask_first_nz<256><<<nt, 256, 0, stream>>>(mview.data, mask_first.ptr, s_mask, (int) nkv);
     CUDA_CHECK(cudaGetLastError());
@@ -1713,7 +1731,7 @@ bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
-    if (!mask || sinks) {
+    if (sinks) {
         return false;
     }
     if (Q->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
@@ -1745,7 +1763,7 @@ bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
     // nb33*(sequence % ne33) (fattn-tile.cuh:860); this path has no equivalent, so a mask
     // that is not broadcast across heads and sequences would silently be read from
     // sequence 0 for every sequence. Decline those shapes and let the tile kernel take them.
-    if (mask->ne[2] != 1 || mask->ne[3] != 1) {
+    if (mask && (mask->ne[2] != 1 || mask->ne[3] != 1)) {
         return false;
     }
     // F16 needs no conversion at all (cuBLAS takes an arbitrary lda, so we point it straight
