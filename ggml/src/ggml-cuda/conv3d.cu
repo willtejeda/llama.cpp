@@ -276,6 +276,47 @@ static void conv3d_launch_implicit_gemm(const half *          input,
     }
 }
 
+// p100k: the implicit GEMM path needs the whole padded input as f16 in pool scratch (half the input's size; a video
+// VAE decode tile can need over 1 GB). That scratch is invisible to the caller's memory planning, so when it does
+// not fit, run the convolution over chunks of output depth: each chunk pads only the input depths it reads, writes
+// a contiguous output chunk, and one 2D copy puts it in place (the output is [B*OC][OD][OH][OW]). Chunks halve
+// until one fits. false: not even one output plane fits (the caller then uses the direct kernel, no scratch).
+template <bool use_mma>
+static bool conv3d_depth_chunks(ggml_backend_cuda_context & ctx, const float * x, const half * w, float * y,
+                                const int32_t * p, int64_t IW, int64_t IH, int64_t ID, int64_t OW, int64_t OH,
+                                int64_t OD, int64_t KW, int64_t KH, int64_t KD, int64_t IC, int64_t OC, int64_t B,
+                                int64_t pw, int64_t ph, int warp_size, cudaStream_t stream) {
+    const int64_t plane = OW * OH;
+    auto in_depth = [&](int64_t n_od) { return (n_od - 1) * p[2] + (KD - 1) * p[8] + 1; };
+    for (int64_t odc = (OD + 1) / 2; odc >= 1; odc = odc == 1 ? 0 : (odc + 1) / 2) {
+        ggml_cuda_pool_alloc<half>  xs(ctx.pool());
+        ggml_cuda_pool_alloc<float> ys(ctx.pool());
+        if (xs.try_alloc(pw * ph * in_depth(odc) * IC * B) == nullptr || ys.try_alloc(plane * odc * OC * B) == nullptr) {
+            continue;
+        }
+        for (int64_t od0 = 0; od0 < OD; od0 += odc) {
+            const int64_t n_od   = std::min(odc, OD - od0);
+            const int64_t pdn    = in_depth(n_od);
+            const int64_t tot_in = pw * ph * pdn * IC * B;
+            // padded depth od0*stride is this chunk's first: shift the depth padding by it
+            conv3d_pad_f16<<<unsigned((tot_in + 255) / 256), 256, 0, stream>>>(
+                x, xs.get(), int(IW), int(IH), int(ID), int(pw), int(ph), int(pdn), p[3], p[4],
+                int(p[5] - od0 * p[2]), int(tot_in));
+            const conv3d_params cp = { pw,   ph, pdn, OW, OH,   n_od, KW,   KH, KD, p[0], p[1],
+                                       p[2], 0,  0,   0,  p[6], p[7], p[8], IC, OC, B,    plane * n_od * OC * B };
+            const dim3 block(warp_size, 4);
+            const dim3 grid(unsigned((plane * n_od + 63) / 64), unsigned((OC + 63) / 64), unsigned(B));
+            conv3d_launch_implicit_gemm<use_mma>(xs.get(), w, ys.get(), cp, 1, grid, block, stream);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaMemcpy2DAsync(y + od0 * plane, OD * plane * sizeof(float), ys.get(),
+                                         n_od * plane * sizeof(float), n_od * plane * sizeof(float), OC * B,
+                                         cudaMemcpyDeviceToDevice, stream));
+        }
+        return true;
+    }
+    return false;
+}
+
 void ggml_cuda_op_conv3d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * kernel = dst->src[0];
     const ggml_tensor * input  = dst->src[1];
@@ -312,7 +353,20 @@ void ggml_cuda_op_conv3d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         (OW - 1) * p[0] + (KW - 1) * p[6] < pw && (OH - 1) * p[1] + (KH - 1) * p[7] < ph &&
         (OD - 1) * p[2] + (KD - 1) * p[8] < pd && (OC + 63) / 64 <= 65535 && B <= 65535) {
         const int                  padded_total = int(pw * ph * pd * IC * B);
-        ggml_cuda_pool_alloc<half> x_half(ctx.pool(), padded_total);
+        ggml_cuda_pool_alloc<half> x_half(ctx.pool());
+        if (x_half.try_alloc(padded_total) == nullptr) {
+            // p100k: no room for the whole padded input in f16: chunks of output depth, else the direct kernel
+            const bool chunked =
+                use_mma ? conv3d_depth_chunks<true>(ctx, x, w, y, p, IW, IH, ID, OW, OH, OD, KW, KH, KD, IC, OC, B,
+                                                    pw, ph, device.warp_size, stream) :
+                          conv3d_depth_chunks<false>(ctx, x, w, y, p, IW, IH, ID, OW, OH, OD, KW, KH, KD, IC, OC, B,
+                                                     pw, ph, device.warp_size, stream);
+            if (!chunked) {
+                const int blocks = int(std::min(int64_t(65535), (total + 255) / 256));
+                conv3d_kernel<<<blocks, 256, 0, stream>>>(x, w, y, params);
+            }
+            return;
+        }
         // Match im2col's F16 input precision without materializing all patches in global memory.
         if (p[3] == 0 && p[4] == 0 && p[5] == 0) {
             ggml_get_to_fp16_cuda(input->type)(x, x_half.get(), padded_total, stream);
@@ -336,10 +390,14 @@ void ggml_cuda_op_conv3d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         }
         const int64_t blocks  = ((positions + 63) / 64) * ((OC + 63) / 64) * B;
         const int     target  = 8 * device.nsm;
-        const int     split_k = int(std::min({ int64_t(32), int64_t(65535) / B, (IC * KW * KH * KD + 63) / 64,
+        int           split_k = int(std::min({ int64_t(32), int64_t(65535) / B, (IC * KW * KH * KD + 63) / 64,
                                                std::max(int64_t(1), (target + blocks - 1) / blocks) }));
         ggml_cuda_pool_alloc<float> partial(ctx.pool());
-        float *                     result = split_k == 1 ? y : partial.alloc(total * split_k);
+        // p100k: no room for the split-K partials: one split, straight into the output
+        if (split_k > 1 && partial.try_alloc(total * split_k) == nullptr) {
+            split_k = 1;
+        }
+        float * result = split_k == 1 ? y : partial.get();
         const dim3                  block(device.warp_size, 4);
         const dim3 grid(unsigned((positions + 63) / 64), unsigned((OC + 63) / 64), unsigned(B * split_k));
         if (use_mma) {

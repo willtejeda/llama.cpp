@@ -1239,6 +1239,10 @@ struct ggml_cuda_pool {
 
     virtual void * alloc(size_t size, size_t * actual_size) = 0;
     virtual void free(void * ptr, size_t size) = 0;
+    // like alloc, but returns nullptr instead of aborting when the device is out of memory, so an op can take a
+    // lower-memory path (p100k: big temporaries of the fold kernels and conv3d are invisible to the caller's
+    // memory planning; stable-diffusion.cpp keeps only a 512 MiB margin for them)
+    virtual void * try_alloc(size_t size, size_t * actual_size) { return alloc(size, actual_size); }
 };
 
 template<typename T>
@@ -1273,6 +1277,14 @@ struct ggml_cuda_pool_alloc {
     T * alloc(ggml_cuda_pool & pool, size_t size) {
         this->pool = &pool;
         return alloc(size);
+    }
+
+    // size in elements; nullptr when the device is out of memory (nothing is allocated then)
+    T * try_alloc(size_t size) {
+        GGML_ASSERT(pool != nullptr);
+        GGML_ASSERT(ptr == nullptr);
+        ptr = (T *) pool->try_alloc(size * sizeof(T), &this->actual_size);
+        return ptr;
     }
 
     T * get() {

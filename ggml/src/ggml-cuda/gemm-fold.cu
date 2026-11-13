@@ -833,19 +833,29 @@ bool ggml_cuda_gemm_fold_try(ggml_backend_cuda_context & ctx, const ggml_tensor 
 
     cudaStream_t stream = ctx.stream();
 
+    // The f16 activations (N*K) and, unless prefetched, the f16 weight come from the pool. They are invisible to the
+    // caller's memory planning (a video DiT's activations can need over 1 GB here), so they are tried first and an
+    // out-of-memory sends the matmul to the regular path instead of aborting. Nothing has been launched by then.
+    ggml_cuda_pool_alloc<half>  x_alloc(ctx.pool());
+    ggml_cuda_pool_alloc<float> s_alloc(ctx.pool());
+    if (x_alloc.try_alloc(N*K) == nullptr || s_alloc.try_alloc(N) == nullptr) {
+        gemm_fold_partner = nullptr;
+        return false;
+    }
     const half * W16 = (const half *) src0->data;
     ggml_cuda_pool_alloc<half> w_alloc(ctx.pool());
     const half * w_pf = to_fp16 ? gemm_fold_prefetched(ctx, src0) : nullptr;
     if (w_pf != nullptr) {
         W16 = w_pf;
     } else if (to_fp16) {
-        w_alloc.alloc(ggml_nelements(src0));
+        if (w_alloc.try_alloc(ggml_nelements(src0)) == nullptr) {
+            gemm_fold_partner = nullptr;
+            return false;
+        }
         to_fp16(src0->data, w_alloc.get(), ggml_nelements(src0), stream);
         W16 = w_alloc.get();
     }
 
-    ggml_cuda_pool_alloc<half>  x_alloc(ctx.pool(), N*K);
-    ggml_cuda_pool_alloc<float> s_alloc(ctx.pool(), N);
     {
         // one read of X (same outputs); GGML_CUDA_FOLD_PRESCALE_V=0: the two-pass kernel
         static const bool pv = ggml_cuda_gemm_fold_env("GGML_CUDA_FOLD_PRESCALE_V", 1) != 0;
@@ -938,21 +948,27 @@ bool ggml_cuda_gemm_fold_try(ggml_backend_cuda_context & ctx, const ggml_tensor 
         const int64_t M2 = pt->src[0]->ne[1];
         const half * W2 = (const half *) pt->src[0]->data;
         ggml_cuda_pool_alloc<half> w2_alloc(ctx.pool());
-        gemm_fold_learn(ctx, src0, pt->src[0]);
         const half * w2_pf = to_fp16 ? gemm_fold_prefetched(ctx, pt->src[0]) : nullptr;
         if (w2_pf != nullptr) {
             W2 = w2_pf;
         } else if (to_fp16) {
-            w2_alloc.alloc(ggml_nelements(pt->src[0]));
-            to_fp16(pt->src[0]->data, w2_alloc.get(), ggml_nelements(pt->src[0]), stream);
-            W2 = w2_alloc.get();
+            // no room for the second weight in f16: run the pair as two plain fold matmuls instead
+            if (w2_alloc.try_alloc(ggml_nelements(pt->src[0])) != nullptr) {
+                to_fp16(pt->src[0]->data, w2_alloc.get(), ggml_nelements(pt->src[0]), stream);
+                W2 = w2_alloc.get();
+            } else {
+                W2 = nullptr;
+            }
         }
-        const dim3 gp((M + M2 + BM - 1)/BM, (N + BN - 1)/BN);
-        gemm_fold_launch_u2(true, gp, stream, W16, X16, cs, Y, (int) (M + M2), (int) N, (int) K, sy,
-            W2, (float *) pt->data, (int) M, (int64_t) (pt->nb[1]/sizeof(float)));
-        CUDA_CHECK(cudaGetLastError());
-        gemm_fold_partner_done = true;
-        return true;
+        if (W2 != nullptr) {
+            gemm_fold_learn(ctx, src0, pt->src[0]);
+            const dim3 gp((M + M2 + BM - 1)/BM, (N + BN - 1)/BN);
+            gemm_fold_launch_u2(true, gp, stream, W16, X16, cs, Y, (int) (M + M2), (int) N, (int) K, sy,
+                W2, (float *) pt->data, (int) M, (int64_t) (pt->nb[1]/sizeof(float)));
+            CUDA_CHECK(cudaGetLastError());
+            gemm_fold_partner_done = true;
+            return true;
+        }
     }
     gemm_fold_learn(ctx, src0, nullptr);
     if (ctx.xchg_want && xchg_direct && peer != nullptr && ctx.peer_f16_ok == 1 && N >= 512 && o16 &&

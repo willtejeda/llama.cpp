@@ -30,6 +30,8 @@
 #include "common.cuh"
 #include "fattn-common.cuh"   // FATTN_KQ_MAX_OFFSET
 #include "fattn-gemm.cuh"
+
+#include <optional>
 #include "convert.cuh"
 
 #include <cublas_v2.h>
@@ -1459,7 +1461,7 @@ struct fa_sparsity_acc {
     }
 };
 
-static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+static bool ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     using namespace fa_fold;
     const ggml_tensor * Q    = dst->src[0];
     const ggml_tensor * K    = dst->src[1];
@@ -1485,34 +1487,80 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
     // compact causal mask (OPTLOG 248) gave that back: GPU0 min free at 262k, vision, -ub 2048: 656 MiB
     static const int chunk_env  = ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_CHUNK", 2048);
     static const int nsplit_env = ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_SPLIT", 2);
-    // P holds C keys x N rows for every virtual head. The LLM shapes (1-2 KV heads per GPU) stay far below
-    // the cap; full self-attention over many heads does not (Wan 5B, 24 heads x 27280 tokens: 5.4 GB at the
-    // defaults). Over the cap: one split (the heads already fill the GPU), then fewer keys per chunk.
-    // 1024 keys, one split measured as fast as the defaults there (45.6 s per step either way).
+    // The workspace below is invisible to the caller's memory planning (stable-diffusion.cpp keeps 512 MiB for
+    // all such scratch), and every buffer scales with the KV heads processed together. GGML_CUDA_FA_FOLD_SCRATCH_MB
+    // caps the whole of it (default 1408; the image and video servers run with a few hundred). LLM shapes (1-8 KV
+    // heads per GPU) stay below the default, so they keep one group and the defaults. Full self-attention over
+    // many heads does not (Wan 5B, 24 heads x 27280 tokens: 5.4 GB of P alone at the defaults). Over the cap: one
+    // split (the heads already fill the GPU), then groups of heads, then fewer keys per chunk. (Before groups, the
+    // cap only shortened the chunk: 1024 keys, one split measured as fast as the defaults on Wan, 45.6 s a step.)
     static const int64_t scratch_cap = (int64_t) ggml_cuda_fa_fold_env("GGML_CUDA_FA_FOLD_SCRATCH_MB", 1408) << 20;
+    static const bool sparsity_diag = ggml_cuda_fa_fold_env("GGML_CUDA_FA_SPARSITY", 0) != 0;
+    static const bool oracle_diag   = getenv("GGML_CUDA_FA_ORACLE_DELTA") != nullptr;
     const int64_t Npad = (N + BN - 1)/BN*BN;
+    // workspace bytes for one KV head at C keys per chunk and ns_ splits
+    auto head_bytes = [&](int64_t C_, int64_t ns_) -> int64_t {
+        return (int64_t) sizeof(half)*D*N                                   // Qf16
+            + ns_*((int64_t) sizeof(half)*D*C_ + (int64_t) sizeof(half2)*DV*(C_/2)   // K16, Vp
+                 + (int64_t) sizeof(half)*C_*Npad                                     // P
+                 + 2*(int64_t) sizeof(float)*(C_/TK)*N                                // mt, lt
+                 + 2*(int64_t) sizeof(float)*DV*N + 3*(int64_t) sizeof(float)*N);     // O, O2, mA, mB, l
+    };
     int64_t nsplit = std::max(1, std::min(8, nsplit_env));
     int64_t chunk  = std::min(chunk_env, MAXTILE*TK);
-    if ((int64_t) sizeof(half)*chunk*Npad*nhkv*nsplit > scratch_cap) {
+    int64_t G      = nhkv;   // KV heads per group
+    if (head_bytes(chunk, nsplit)*nhkv > scratch_cap) {
         nsplit = 1;
-        chunk  = std::min<int64_t>(chunk, scratch_cap/((int64_t) sizeof(half)*Npad*nhkv)/TK*TK);
+        if (sparsity_diag || oracle_diag) {   // the diagnostics see all heads at once: shorten the chunk only
+            chunk = std::min<int64_t>(chunk, scratch_cap/((int64_t) sizeof(half)*Npad*nhkv)/TK*TK);
+        } else {
+            G = std::min<int64_t>(nhkv, scratch_cap/head_bytes(chunk, 1));
+            while (G < 1 && chunk > TK) {
+                chunk -= TK;
+                G = std::min<int64_t>(nhkv, scratch_cap/head_bytes(chunk, 1));
+            }
+            G = std::max<int64_t>(G, 1);
+        }
     }
+    chunk = std::max<int64_t>(chunk, TK);
     const int64_t Lsp = ((nkv + nsplit - 1)/nsplit + TK - 1)/TK*TK;   // keys per split
     const int64_t C = std::max<int64_t>(TK, (std::min<int64_t>(chunk, Lsp) + TK - 1)/TK*TK);
-    const int64_t nz = nhkv*nsplit;   // virtual heads
 
     ggml_cuda_pool & pool = ctx.pool();
-    ggml_cuda_pool_alloc<half>  Qf16(pool, D*N*nhkv);
-    ggml_cuda_pool_alloc<half>  K16(pool, D*C*nz);
-    ggml_cuda_pool_alloc<half2> Vp(pool, DV*(C/2)*nz);
-    ggml_cuda_pool_alloc<half>  P(pool, C*Npad*nz);
-    ggml_cuda_pool_alloc<float> mt(pool, (C/TK)*N*nz);
-    ggml_cuda_pool_alloc<float> lt(pool, (C/TK)*N*nz);
-    ggml_cuda_pool_alloc<float> O(pool, DV*N*nz);
-    ggml_cuda_pool_alloc<float> O2(pool, DV*N*nz);
-    ggml_cuda_pool_alloc<float> mA(pool, N*nz);
-    ggml_cuda_pool_alloc<float> mB(pool, N*nz);
-    ggml_cuda_pool_alloc<float> l_state(pool, N*nz);
+    // the group's buffers, tried so that an out-of-memory halves the group instead of aborting; none fits even
+    // for one head: the caller runs the cuBLAS path instead (members are freed in reverse order, as the pool needs)
+    struct fold_ws {
+        ggml_cuda_pool_alloc<half>  Qf16, K16, P;
+        ggml_cuda_pool_alloc<half2> Vp;
+        ggml_cuda_pool_alloc<float> mt, lt, O, O2, mA, mB, l_state;
+        bool ok = false;
+        fold_ws(ggml_cuda_pool & p, int64_t D, int64_t DV, int64_t N, int64_t Npad, int64_t C, int64_t Gh, int64_t nz) :
+                Qf16(p), K16(p), P(p), Vp(p), mt(p), lt(p), O(p), O2(p), mA(p), mB(p), l_state(p) {
+            ok = Qf16.try_alloc(D*N*Gh) && K16.try_alloc(D*C*nz) && P.try_alloc(C*Npad*nz) &&
+                 Vp.try_alloc(DV*(C/2)*nz) && mt.try_alloc((C/TK)*N*nz) && lt.try_alloc((C/TK)*N*nz) &&
+                 O.try_alloc(DV*N*nz) && O2.try_alloc(DV*N*nz) && mA.try_alloc(N*nz) && mB.try_alloc(N*nz) &&
+                 l_state.try_alloc(N*nz);
+        }
+    };
+    std::optional<fold_ws> ws;
+    for (;;) {
+        ws.emplace(pool, D, DV, N, Npad, C, G, G*nsplit);
+        if (ws->ok) {
+            break;
+        }
+        ws.reset();
+        if (G == 1 || sparsity_diag || oracle_diag) {
+            return false;
+        }
+        G = (G + 1)/2;
+    }
+    const int64_t nz = G*nsplit;   // virtual heads per group
+    half  * const Qf16_p = ws->Qf16.ptr;
+    half  * const K16_p  = ws->K16.ptr;
+    half2 * const Vp_p   = ws->Vp.ptr;
+    half  * const P_p    = ws->P.ptr;
+    float * const mt_p   = ws->mt.ptr;
+    float * const lt_p   = ws->lt.ptr;
     ggml_cuda_pool_alloc<float> mask_first(pool, nt);
 
     const int64_t dst_s1 = dst->nb[1]/sizeof(float);
@@ -1595,22 +1643,29 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
     std::vector<float> h_mt, h_lt;
 
     for (int64_t s = 0; s < ns; ++s) {
+      for (int64_t h0 = 0; h0 < nhkv; h0 += G) {
+        // this group: KV heads [h0, h0 + gh); Q, K, V and dst are read from the group's first head on
+        const int64_t gh  = std::min<int64_t>(G, nhkv - h0);
+        const int64_t nzg = gh*nsplit;
+        const char * Kg = (const char *) K->data + s*K->nb[3] + h0*K->nb[2];
+        const char * Vg = (const char *) V->data + s*V->nb[3] + h0*V->nb[2];
         if (sparsity) {
             sacc.init(N, nsplit*(Lsp/TK), nhkv);
         }
-        for (int64_t kvh = 0; kvh < nhkv; ++kvh) {
+        for (int64_t kvh = 0; kvh < gh; ++kvh) {
             fattn_gemm_q_to_f16<<<dim3(nt, gqa, 1), 256, 0, stream>>>(
-                (const char *) Q->data + s*Q->nb[3], Qf16.ptr + kvh*N*D,
-                D, nt, Q->nb[1], Q->nb[2], kvh*gqa, scale*0.25f);
+                (const char *) Q->data + s*Q->nb[3], Qf16_p + kvh*N*D,
+                D, nt, Q->nb[1], Q->nb[2], (h0 + kvh)*gqa, scale*0.25f);
             CUDA_CHECK(cudaGetLastError());
         }
-        float * O_cur = O.ptr;
-        float * O_nxt = O2.ptr;
-        float * m_cur = mA.ptr;
-        float * m_nxt = mB.ptr;
-        CUDA_CHECK(cudaMemsetAsync(O_cur, 0, DV*N*nz*sizeof(float), stream));
-        CUDA_CHECK(cudaMemsetAsync(l_state.ptr, 0, N*nz*sizeof(float), stream));
-        fattn_gemm_fill<<<(N*nz + 255)/256, 256, 0, stream>>>(m_cur, -INFINITY, N*nz);
+        float * O_cur = ws->O.ptr;
+        float * O_nxt = ws->O2.ptr;
+        float * m_cur = ws->mA.ptr;
+        float * m_nxt = ws->mB.ptr;
+        float * l_st  = ws->l_state.ptr;
+        CUDA_CHECK(cudaMemsetAsync(O_cur, 0, DV*N*nzg*sizeof(float), stream));
+        CUDA_CHECK(cudaMemsetAsync(l_st, 0, N*nzg*sizeof(float), stream));
+        fattn_gemm_fill<<<(N*nzg + 255)/256, 256, 0, stream>>>(m_cur, -INFINITY, N*nzg);
         CUDA_CHECK(cudaGetLastError());
 
         if (oracle) {
@@ -1623,12 +1678,12 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
                 const int nb  = (int) (D/QK4_0);
                 const int kpb = 256/nb;
                 const int npairs = ntile*TK/2;
-                fa_fold_dequant_launch(K->type, V->type, dim3((npairs + kpb - 1)/kpb, nz, 1), kpb*nb, stream,
-                    (const char *) K->data + s*K->nb[3], (const char *) V->data + s*V->nb[3],
-                    K16.ptr, Vp.ptr, K->nb[1], K->nb[2], V->nb[1], V->nb[2], (int) D, g, (int) C);
-                fa_fold_qk2<<<dim3(ntile, (N + BN - 1)/BN, nz), 256, 0, stream>>>(K16.ptr, Qf16.ptr, mview.data,
-                    mask_first.ptr, s_mask, P.ptr, mt.ptr, lt.ptr, (int) D, (int) N, (int) nt, (int) C, g);
-                fa_oracle_max<<<dim3((N + 127)/128, nhkv, 1), 128, 0, stream>>>(mt.ptr, Mq.ptr, (int) N, (int) C, ntile, (int) nsplit, (int) nz);
+                fa_fold_dequant_launch(K->type, V->type, dim3((npairs + kpb - 1)/kpb, nzg, 1), kpb*nb, stream,
+                    Kg, Vg,
+                    K16_p, Vp_p, K->nb[1], K->nb[2], V->nb[1], V->nb[2], (int) D, g, (int) C);
+                fa_fold_qk2<<<dim3(ntile, (N + BN - 1)/BN, nzg), 256, 0, stream>>>(K16_p, Qf16_p, mview.data,
+                    mask_first.ptr, s_mask, P_p, mt_p, lt_p, (int) D, (int) N, (int) nt, (int) C, g);
+                fa_oracle_max<<<dim3((N + 127)/128, nhkv, 1), 128, 0, stream>>>(mt_p, Mq.ptr, (int) N, (int) C, ntile, (int) nsplit, (int) nzg);
                 CUDA_CHECK(cudaGetLastError());
             }
         }
@@ -1641,16 +1696,16 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
                 const int nb  = (int) (D/QK4_0);
                 const int kpb = 256/nb;   // key pairs per block
                 const int npairs = ntile*TK/2;
-                fa_fold_dequant_launch(K->type, V->type, dim3((npairs + kpb - 1)/kpb, nz, 1), kpb*nb, stream,
-                    (const char *) K->data + s*K->nb[3], (const char *) V->data + s*V->nb[3],
-                    K16.ptr, Vp.ptr, K->nb[1], K->nb[2], V->nb[1], V->nb[2], (int) D, g, (int) C);
+                fa_fold_dequant_launch(K->type, V->type, dim3((npairs + kpb - 1)/kpb, nzg, 1), kpb*nb, stream,
+                    Kg, Vg,
+                    K16_p, Vp_p, K->nb[1], K->nb[2], V->nb[1], V->nb[2], (int) D, g, (int) C);
                 CUDA_CHECK(cudaGetLastError());
             }
             {
-                const dim3 grid(ntile, (N + BN - 1)/BN, nz);
-                const half * a_k = K16.ptr; const half * a_q = Qf16.ptr; const half * a_m = mview.data;
-                const float * a_mf = mask_first.ptr; int64_t a_sm = s_mask; half * a_p = P.ptr;
-                float * a_mt = mt.ptr; float * a_lt = lt.ptr; int a_D = (int) D, a_N = (int) N, a_nt = (int) nt, a_C = (int) C;
+                const dim3 grid(ntile, (N + BN - 1)/BN, nzg);
+                const half * a_k = K16_p; const half * a_q = Qf16_p; const half * a_m = mview.data;
+                const float * a_mf = mask_first.ptr; int64_t a_sm = s_mask; half * a_p = P_p;
+                float * a_mt = mt_p; float * a_lt = lt_p; int a_D = (int) D, a_N = (int) N, a_nt = (int) nt, a_C = (int) C;
                 fa_fold_split a_g = g; bool a_pf = prefix;
                 void * args[] = {&a_k, &a_q, &a_m, &a_mf, &a_sm, &a_p, &a_mt, &a_lt, &a_D, &a_N, &a_nt, &a_C, &a_g, &a_pf};
                 if (!fa_fold_sass_launch(0, grid, stream, args)) {
@@ -1660,26 +1715,26 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
                 CUDA_CHECK(cudaGetLastError());
             }
             if (oracle) {
-                fa_oracle_prune<<<dim3(ntile, (N + BN - 1)/BN, nz), BN, 0, stream>>>(P.ptr, mt.ptr, lt.ptr, Mq.ptr, oracle_dlog2,
+                fa_oracle_prune<<<dim3(ntile, (N + BN - 1)/BN, nzg), BN, 0, stream>>>(P_p, mt_p, lt_p, Mq.ptr, oracle_dlog2,
                     (int) N, (int) C, (int) nsplit, ocnt.ptr, ocnt.ptr + 1);
                 CUDA_CHECK(cudaGetLastError());
             }
             if (sparsity) {
-                const size_t cnt = (size_t) (C/TK)*N*nz;
+                const size_t cnt = (size_t) (C/TK)*N*nzg;
                 h_mt.resize(cnt); h_lt.resize(cnt);
-                CUDA_CHECK(cudaMemcpyAsync(h_mt.data(), mt.ptr, cnt*sizeof(float), cudaMemcpyDeviceToHost, stream));
-                CUDA_CHECK(cudaMemcpyAsync(h_lt.data(), lt.ptr, cnt*sizeof(float), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_mt.data(), mt_p, cnt*sizeof(float), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_lt.data(), lt_p, cnt*sizeof(float), cudaMemcpyDeviceToHost, stream));
                 CUDA_CHECK(cudaStreamSynchronize(stream));
                 // mt/lt are laid out [z][C/TK][N]; only the first ntile tiles of this chunk are written
-                std::vector<float> cm((size_t) ntile*N*nz), cl((size_t) ntile*N*nz);
-                for (int64_t z = 0; z < nz; z++) {
+                std::vector<float> cm((size_t) ntile*N*nzg), cl((size_t) ntile*N*nzg);
+                for (int64_t z = 0; z < nzg; z++) {
                     for (int64_t tt = 0; tt < ntile; tt++) {
                         memcpy(&cm[((size_t) (z*ntile + tt))*N], &h_mt[((size_t) (z*(C/TK) + tt))*N], N*sizeof(float));
                         memcpy(&cl[((size_t) (z*ntile + tt))*N], &h_lt[((size_t) (z*(C/TK) + tt))*N], N*sizeof(float));
                     }
                 }
                 // a split whose keys end before this chunk's ntile tiles leaves stale values: mask by key range
-                for (int64_t z = 0; z < nz; z++) {
+                for (int64_t z = 0; z < nzg; z++) {
                     const int64_t off = (z % nsplit)*Lsp + c;
                     for (int64_t tt = 0; tt < ntile; tt++) {
                         if (off + tt*TK >= nkv || c + tt*TK >= Lsp) {
@@ -1687,13 +1742,13 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
                         }
                     }
                 }
-                sacc.add(cm, cl, nz, nsplit, ntile, c/TK, Lsp/TK);
+                sacc.add(cm, cl, nzg, nsplit, ntile, c/TK, Lsp/TK);
             }
             {
-                const dim3 grid(DV/BM, (N + BN - 1)/BN, nz);
+                const dim3 grid(DV/BM, (N + BN - 1)/BN, nzg);
                 static const bool pv2 = ggml_cuda_fa_fold_env("GGML_CUDA_FA_PV2", 1) != 0;
-                const half2 * a_v = Vp.ptr; const half * a_p = P.ptr; const float * a_mt = mt.ptr; const float * a_lt = lt.ptr;
-                const float * a_mi = m_cur; float * a_mo = m_nxt; float * a_l = l_state.ptr;
+                const half2 * a_v = Vp_p; const half * a_p = P_p; const float * a_mt = mt_p; const float * a_lt = lt_p;
+                const float * a_mi = m_cur; float * a_mo = m_nxt; float * a_l = l_st;
                 const float * a_oi = O_cur; float * a_oo = O_nxt; int a_DV = (int) DV, a_N = (int) N, a_C = (int) C, a_nti = ntile;
                 const float * a_mf = mask_first.ptr; int a_nt = (int) nt; fa_fold_split a_g = g; bool a_pf = prefix;
                 void * args[] = {&a_v, &a_p, &a_mt, &a_lt, &a_mi, &a_mo, &a_l, &a_oi, &a_oo, &a_DV, &a_N, &a_C, &a_nti, &a_mf, &a_nt, &a_g, &a_pf};
@@ -1707,8 +1762,8 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
             std::swap(m_cur, m_nxt);
         }
 
-        fa_fold_finalize<<<dim3(nt, gqa, nhkv), 256, 0, stream>>>(
-            O_cur, m_cur, l_state.ptr, (float *) dst->data + s*(dst->nb[3]/sizeof(float)),
+        fa_fold_finalize<<<dim3(nt, gqa, gh), 256, 0, stream>>>(
+            O_cur, m_cur, l_st, (float *) dst->data + s*(dst->nb[3]/sizeof(float)) + h0*gqa*dst_s1,
             (int) DV, (int) nt, (int) N, (int) gqa, (int) nsplit, dst_s1, dst_s2);
         CUDA_CHECK(cudaGetLastError());
         if (sparsity) {
@@ -1721,7 +1776,9 @@ static void ggml_cuda_flash_attn_ext_fold(ggml_backend_cuda_context & ctx, ggml_
             fprintf(stderr, "fa_oracle dev %d delta %.2f nkv %lld nt %lld: kept %.4f of %llu nonzero logits\n", ctx.device,
                 oracle_delta, (long long) nkv, (long long) nt, h[1] ? (double) h[0]/h[1] : 0.0, h[1]);
         }
+      }
     }
+    return true;
 }
 
 bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
@@ -1794,8 +1851,8 @@ bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
 }
 
 void ggml_cuda_flash_attn_ext_gemm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    if (ggml_cuda_fa_fold_usable(dst)) {
-        ggml_cuda_flash_attn_ext_fold(ctx, dst);
+    // the fold path returns false when its workspace does not fit even for one head: cuBLAS path below
+    if (ggml_cuda_fa_fold_usable(dst) && ggml_cuda_flash_attn_ext_fold(ctx, dst)) {
         return;
     }
 

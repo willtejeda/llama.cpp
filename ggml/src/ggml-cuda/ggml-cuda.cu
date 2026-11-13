@@ -458,6 +458,16 @@ const ggml_cuda_device_info & ggml_cuda_info() {
 // #define DEBUG_CUDA_MALLOC
 
 // buffer pool for cuda (legacy)
+// GGML_CUDA_TRY_ALLOC_LIMIT_KB=n (diagnostic): try_alloc refuses anything larger than n KiB, so the low-memory
+// paths of the fold kernels and conv3d can be tested against the CPU (test-backend-ops) without filling the card
+static bool ggml_cuda_try_alloc_refused(size_t size) {
+    static const size_t limit = [] {
+        const char * e = getenv("GGML_CUDA_TRY_ALLOC_LIMIT_KB");
+        return e ? (size_t) atoll(e) << 10 : SIZE_MAX;
+    }();
+    return size > limit;
+}
+
 struct ggml_cuda_pool_leg : public ggml_cuda_pool {
     static const int MAX_BUFFERS = 256;
 
@@ -509,6 +519,17 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
     }
 
     void * alloc(size_t size, size_t * actual_size) override {
+        return alloc_impl(size, actual_size, false);
+    }
+
+    void * try_alloc(size_t size, size_t * actual_size) override {
+        if (ggml_cuda_try_alloc_refused(size)) {
+            return nullptr;
+        }
+        return alloc_impl(size, actual_size, true);
+    }
+
+    void * alloc_impl(size_t size, size_t * actual_size, bool may_fail) {
 #ifdef DEBUG_CUDA_MALLOC
         int nnz = 0;
         size_t max_size = 0;
@@ -563,6 +584,10 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
             if (err == cudaSuccess) {
                 GGML_LOG_DEBUG(GGML_CUDA_NAME " pool[%d]: retry succeeded\n", device);
             }
+        }
+        if (err == cudaErrorMemoryAllocation && may_fail) {
+            (void)cudaGetLastError();
+            return nullptr;
         }
         CUDA_CHECK(err);
         *actual_size = look_ahead_size;
@@ -627,6 +652,17 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
     }
 
     void * alloc(size_t size, size_t * actual_size) override {
+        return alloc_impl(size, actual_size, false);
+    }
+
+    void * try_alloc(size_t size, size_t * actual_size) override {
+        if (ggml_cuda_try_alloc_refused(size)) {
+            return nullptr;
+        }
+        return alloc_impl(size, actual_size, true);
+    }
+
+    void * alloc_impl(size_t size, size_t * actual_size, bool may_fail) {
         // round up the allocation size to the alignment to ensure that all allocations are aligned for all data types
         const size_t alignment = 128;
         size = alignment * ((size + alignment - 1) / alignment);
@@ -646,7 +682,11 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
             prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
             prop.location.id = physical_device;
             CUmemGenericAllocationHandle handle;
-            CU_CHECK(cuMemCreate(&handle, reserve_size, &prop, 0));
+            const CUresult created = cuMemCreate(&handle, reserve_size, &prop, 0);
+            if (created == CUDA_ERROR_OUT_OF_MEMORY && may_fail) {
+                return nullptr;   // nothing changed: the pool stays as it was
+            }
+            CU_CHECK(created);
 
             // reserve virtual address space (if not already reserved)
             if (pool_addr == 0) {
