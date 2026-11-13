@@ -820,8 +820,13 @@ bool ggml_cuda_gemm_fold_glu_pending() {
     return gemm_fold_glu != nullptr;
 }
 
+bool ggml_cuda_gemm_fold_f32_on() {
+    static const bool on = ggml_cuda_gemm_fold_env("GGML_CUDA_GEMM_FOLD_F32", 0) != 0;
+    return on;
+}
+
 bool ggml_cuda_gemm_fold_try(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1,
-                             ggml_tensor * dst) {
+                             ggml_tensor * dst, bool f32_out) {
     const int mode = ggml_cuda_gemm_fold_mode();
     if (!gemm_fold_shape_ok(ctx, src0, src1, dst)) {
         return false;
@@ -895,7 +900,7 @@ bool ggml_cuda_gemm_fold_try(ggml_backend_cuda_context & ctx, const ggml_tensor 
     const half  * X16 = x_alloc.get();
     const float * cs  = s_alloc.get();
     float       * Y   = (float *) dst->data;
-    const bool    o16 = mode == 2;
+    const bool    o16 = mode == 2 && !f32_out;
 
     // exchange source: token chunks with an event after each (see xchg in common.cuh)
     static const int xchg_chunks = std::max(1, std::min(8, ggml_cuda_gemm_fold_env("GGML_CUDA_XCHG_CHUNKS", 4)));

@@ -2254,6 +2254,11 @@ static void ggml_cuda_mul_mat_cublas(ggml_backend_cuda_context & ctx, const ggml
             compute_type = GGML_TYPE_F32;
         }
     }
+    // opt-in: fp32-precision matmuls through the fold path with fp32 output (see gemm-fold.cuh)
+    if (compute_type == GGML_TYPE_F32 && ggml_cuda_gemm_fold_f32_on() &&
+            ggml_cuda_gemm_fold_try(ctx, src0, src1, dst, /*f32_out=*/true)) {
+        return;
+    }
 
     constexpr size_t max_src0_convert_size = 512ull * 1024 * 1024;
     const size_t src0_f32_size = ggml_nelements(src0) * sizeof(float);

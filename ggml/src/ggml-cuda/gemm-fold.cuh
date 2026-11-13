@@ -5,8 +5,15 @@
 // Prefill GEMM for Pascal: fp16 HFMA2 products with short fp16 chains folded into fp32 accumulators.
 // Replaces cuBLAS COMPUTE_16F (whole-K fp16 accumulation) for quantized/f16 weights x f32
 // activations. Returns false if it does not handle the shape. See gemm-fold.cu.
+// f32_out: write fp32 results (no fp16 output stage), for matmuls that asked for fp32 compute.
 bool ggml_cuda_gemm_fold_try(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1,
-                             ggml_tensor * dst);
+                             ggml_tensor * dst, bool f32_out = false);
+
+// GGML_CUDA_GEMM_FOLD_F32=1 (default off): matmuls that run in fp32 cuBLAS because they asked for fp32 precision
+// (GGML_PREC_F32, or GGML_CUDA_CUBLAS_COMPUTE_TYPE=f32) take the fold path with fp32 output instead: fp16 products of
+// prescaled inputs, fp32 accumulation, so the overflow those settings guard against cannot happen. For video DiTs
+// on Pascal (MiniMax-H3: fp32 SGEMM was 64% of a step).
+bool ggml_cuda_gemm_fold_f32_on();
 
 // True for a matmul the fold path would take but for its small row count: those run in fp32 cuBLAS
 // instead (exact, and cheap at that size), not in whole-K fp16.
