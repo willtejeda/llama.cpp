@@ -417,7 +417,7 @@ constexpr int GEMM_FOLD_RASTER = 4;
 // PAIR: two weights sharing X in one launch (gemm_fold_pair). Rows [0, Ms) come from W into Y, rows
 // [Ms, M) from W2 into Y2; Ms is a multiple of BM, so each block sits wholly on one side and every
 // output is computed exactly as in two separate launches.
-template <bool PAIR>
+template <bool PAIR, bool R16 = true>
 __global__ void __launch_bounds__(256, 1) gemm_fold_kernel_u2(
         const half * __restrict__ W, const half * __restrict__ X, const float * __restrict__ cs,
         float * __restrict__ Y, const int M, const int N, const int K, const int64_t sy,
@@ -560,8 +560,10 @@ __global__ void __launch_bounds__(256, 1) gemm_fold_kernel_u2(
                 continue;
             }
             float4 v = make_float4(acc[ih*4 + 0][j]*s, acc[ih*4 + 1][j]*s, acc[ih*4 + 2][j]*s, acc[ih*4 + 3][j]*s);
-            v.x = __half2float(__float2half(v.x)); v.y = __half2float(__float2half(v.y));
-            v.z = __half2float(__float2half(v.z)); v.w = __half2float(__float2half(v.w));
+            if (R16) {  // round to fp16 precision (LLM path); R16=false keeps fp32 for fp32-precision matmuls
+                v.x = __half2float(__float2half(v.x)); v.y = __half2float(__float2half(v.y));
+                v.z = __half2float(__float2half(v.z)); v.w = __half2float(__float2half(v.w));
+            }
             *(float4 *) (Yc + n*syc + m) = v;
         }
     }
@@ -1043,6 +1045,14 @@ bool ggml_cuda_gemm_fold_try(ggml_backend_cuda_context & ctx, const ggml_tensor 
 
     if (u2) {
         gemm_fold_launch_u2(false, grid, stream, W16, X16, cs, Y, (int) M, (int) N, (int) K, sy, nullptr, nullptr, 0, 0);
+        CUDA_CHECK(cudaGetLastError());
+        return true;
+    }
+    // fp32 output with the u2 kernel (compiled, without the fp16 rounding; the bank-fixed SASS rounds)
+    static const bool u2_f32_env = ggml_cuda_gemm_fold_env("GGML_CUDA_GEMM_FOLD_U2_F32", 1) != 0;
+    if (f32_out && u2_env && u2_f32_env && K % 64 == 0 && ggml_cuda_gemm_fold_k2() == 128) {
+        gemm_fold_kernel_u2<false, false><<<grid, 256, 0, stream>>>(W16, X16, cs, Y, (int) M, (int) N, (int) K, sy,
+                                                                   nullptr, nullptr, 0, 0);
         CUDA_CHECK(cudaGetLastError());
         return true;
     }
