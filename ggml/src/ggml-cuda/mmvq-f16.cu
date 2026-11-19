@@ -2488,7 +2488,10 @@ static mmvq_f16_q5_K_cfg mmvq_f16_q5_K_pick(const int nc, const int64_t rows, co
     if (rows < 1024) {
         return nc <= 5 ? mmvq_f16_q5_K_cfg{ 2, 2, 0, 8 } : mmvq_f16_q5_K_cfg{ 2, 1, 0, 16 };
     }
-    return nc <= 2 ? mmvq_f16_q5_K_cfg{ 4, 2, 0, 6 } : mmvq_f16_q5_K_cfg{ 4, 1, 0, 8 };
+    // p100k (from Strata, 11-18, Gyro-S shapes 10240/6144/12288 x 2560 and 2560 x 6144): the 2-warp tile also wins at
+    // 3-5 columns, 5-20%; 6+ columns keep the 1-warp tile. GGML_CUDA_MMVQ_F16_Q5_NC5=0: the old rule (nc <= 2)
+    static const int nc2 = [] { const char * s = getenv("GGML_CUDA_MMVQ_F16_Q5_NC5"); return (s && atoi(s) == 0) ? 2 : 5; }();
+    return nc <= nc2 ? mmvq_f16_q5_K_cfg{ 4, 2, 0, 6 } : mmvq_f16_q5_K_cfg{ 4, 1, 0, 8 };
 #endif
 }
 
@@ -2999,11 +3002,17 @@ static bool mmvq_f16_shape_ok(const ggml_tensor * src0, const ggml_tensor * src1
     // decode here: 3x closer to an all-fp32 run (27B Q5_K_M decode KLD 0.00178 -> 0.00101) but -1.25 t/s on the
     // all-q6_K 27B Q6_K (tg128 29.82 -> 28.57, ABBA x2), so it stays opt-in (OPTLOG 317).
     static const int64_t q6_min = [] { const char * s = getenv("GGML_CUDA_MMVQ_F16_Q6_MIN"); return s ? (int64_t) atoll(s) : (int64_t) 2; }();
-    if (!q6 && mmvq_f16_gen_type(src0->type) && !mmvq_f16_gen_takes(src0->type, ncols)) {
+    // p100k (from Strata, 11-18), OPT-IN (GGML_CUDA_MMVQ_F16_HEAD1=1): Q6_K matrices of 32k+ rows - output / MTP draft
+    // heads - take the fp16 path from one column (Strata's 106k-row Q6_K draft head: q8_1 1.11 -> fp16 0.47 ms, +4.2%
+    // decode). Not measured on a llama.cpp model with a Q6_K head yet; on Tiel's Q8_0 head the same rule cost 0.8%
+    // (tiel-f16split-20261118), so it is Q6_K only and off by default.
+    static const bool head1 = [] { const char * s = getenv("GGML_CUDA_MMVQ_F16_HEAD1"); return s && atoi(s) != 0; }();
+    const bool head = head1 && q6 && rows >= 32768 && ncols >= 1;
+    if (!head && !q6 && mmvq_f16_gen_type(src0->type) && !mmvq_f16_gen_takes(src0->type, ncols)) {
         return false;
     }
     return !(!enabled || cc >= GGML_CUDA_CC_VOLTA || GGML_CUDA_CC_IS_AMD(cc) || !(q6 || mmvq_f16_gen_type(src0->type)) ||
-            src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 || ncols < (q6 ? q6_min : 1) || ncols > MMVQ_F16_MAX_COLS ||
+            src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 || ncols < (q6 && !head ? q6_min : 1) || ncols > MMVQ_F16_MAX_COLS ||
             K % (q6 ? 512 : 256) != 0 || rows < min_rows || src0->ne[2] != 1 || src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1 ||
             src0->nb[1] != ggml_row_size(src0->type, K) || src1->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float) ||
             (src1->nb[1] % 16) != 0 || ((uintptr_t) src1->data % 16) != 0 || ((uintptr_t) src0->data % 4) != 0);
