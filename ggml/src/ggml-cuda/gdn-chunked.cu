@@ -89,6 +89,17 @@ bool ggml_cuda_gdn_alt(ggml_backend_cuda_context & ctx, const ggml_cuda_gdn_alt_
     if (mode == 0 || L < GCH) {
         return false;
     }
+    // The chunk kernels use float4 loads and stores; GGML views can have
+    // unaligned bases or row strides. Use scalar CUDA for those layouts.
+    constexpr size_t vec_bytes = alignof(float4);
+    constexpr size_t vec_floats = vec_bytes / sizeof(float);
+    const uintptr_t bases = (uintptr_t) a.q | (uintptr_t) a.k | (uintptr_t) a.v |
+        (uintptr_t) a.curr_state | (uintptr_t) a.dst | (uintptr_t) a.state;
+    const int64_t strides = a.sq1 | a.sq2 | a.sq3 | a.sv1 | a.sv2 | a.sv3 |
+        (a.s_idx ? a.s_row : 0) | (keep ? a.state_slot_stride : 0);
+    if (bases % vec_bytes != 0 || strides % vec_floats != 0) {
+        return false;
+    }
     const size_t n = gdn_f32::gdn_ch_scratch_floats(a.H, a.neqk1, a.n_seqs, L);
     ggml_cuda_pool_alloc<float> scratch(ctx.pool(), n);
 #define GDN_CH_RUN(NS) do { \
