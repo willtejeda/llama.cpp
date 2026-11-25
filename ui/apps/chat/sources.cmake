@@ -3,6 +3,11 @@
 set(UI_SOURCE_GLOBS
     src/*
     static/*
+    # Llama UI and the harness, which the app compiles from source
+    ../../lib/ui/src/lib/*
+    # Llama Voice, also compiled from source
+    ../../lib/voice/src/*
+    ../../lib/harness/src/*
 )
 
 set(UI_SOURCE_FILES
@@ -10,7 +15,9 @@ set(UI_SOURCE_FILES
     package-lock.json
     src/.gitignore
     vite.config.ts
-    svelte.config.js
     tsconfig.json
+    scripts/llama-ui.js
+    scripts/vite-plugin-llama-ui.ts
+    ../../lib/ui/package.json
     scripts/vite-plugin-llama-cpp-build.ts
 )

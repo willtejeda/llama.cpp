@@ -1,5 +1,6 @@
 export * from './actions';
 export * from './badges';
+export { default as DropImportOverlay } from './DropImportOverlay.svelte';
 export * from './chat';
 export * from './content';
 export * from './dialogs';
@@ -9,4 +10,4 @@ export * from './misc';
 export * from './settings';
 export * from './models';
 export * from './navigation';
-export * from './server';
+export * from './servers';

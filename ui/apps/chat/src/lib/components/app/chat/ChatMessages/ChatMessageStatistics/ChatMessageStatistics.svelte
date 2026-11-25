@@ -1,11 +1,20 @@
 <script lang="ts">
-	import { BookOpenText, Clock, Gauge, Layers, Sparkles, WholeWord, Wrench } from '@lucide/svelte';
-	import { ChatMessageStatisticsBadge } from '$lib/components/app';
-	import * as Tooltip from '$lib/components/ui/tooltip';
-	import { DEFAULT_PERFORMANCE_TIME, MS_PER_SECOND } from '$lib/constants';
-	import { ChatMessageStatisticsMode, ChatMessageStatsView } from '$lib/enums';
-	import type { ChatMessageAgenticTimings } from '$lib/types/chat';
-	import { formatPerformanceTime } from '$lib/utils';
+	import * as Tooltip from '@ggml-org/llama-ui/ui/tooltip';
+	import {
+		BookOpenText,
+		Clock,
+		Gauge,
+		Hourglass,
+		Layers,
+		Sparkles,
+		WholeWord,
+		Wrench
+	} from '@lucide/svelte';
+	import { ChatMessageStatisticsBadge } from '#lib/components/app/index.ts';
+	import { DEFAULT_PERFORMANCE_TIME, MS_PER_SECOND } from '#lib/constants/index.ts';
+	import { ChatMessageStatisticsMode, ChatMessageStatsView } from '#lib/enums/index.ts';
+	import type { ChatMessageAgenticTimings } from '#lib/types/chat.js';
+	import { formatPerformanceTime } from '#lib/utils/index.ts';
 	import type { Component } from 'svelte';
 
 	interface Props {
@@ -117,9 +126,14 @@
 		hasAgenticStats ? formatPerformanceTime(agenticTimings!.toolsMs) : DEFAULT_PERFORMANCE_TIME
 	);
 
+	// wall time of the whole task when recorded (permission waits included);
+	// older messages fall back to the sum of LLM and tool time
 	let agenticTotalTimeMs = $derived(
 		hasAgenticStats
-			? agenticTimings!.toolsMs + agenticTimings!.llm.predicted_ms + agenticTimings!.llm.prompt_ms
+			? (agenticTimings!.totalMs ??
+					agenticTimings!.toolsMs +
+						agenticTimings!.llm.predicted_ms +
+						agenticTimings!.llm.prompt_ms)
 			: 0
 	);
 
@@ -145,17 +159,17 @@
 			{#snippet child({ props })}
 				<button
 					{...props}
-					class="inline-flex h-5 w-5 items-center justify-center rounded-sm transition-colors {activeView ===
+					class="inline-flex size-5 items-center justify-center rounded-sm transition-colors {activeView ===
 					opts.view
-						? 'bg-background text-foreground shadow-sm'
+						? 'bg-(--surface-lifted) text-(--fg-default) shadow-(--elevation-control)'
 						: opts.disabled
 							? 'cursor-not-allowed opacity-40'
-							: 'hover:text-foreground'}"
+							: 'hover:text-(--fg-default)'}"
 					disabled={opts.disabled}
 					onclick={() => !opts.disabled && (activeView = opts.view)}
 					type="button"
 				>
-					<IconComponent class="h-3 w-3" />
+					<IconComponent class="size-icon-xs" />
 
 					<span class="sr-only">{opts.label}</span>
 				</button>
@@ -168,9 +182,11 @@
 	</Tooltip.Root>
 {/snippet}
 
-<div class="inline-flex items-center text-xs text-muted-foreground">
+<div class="inline-flex items-center text-caption text-muted-foreground">
 	{#if isSwitchable}
-		<div class="inline-flex items-center rounded-sm bg-muted-foreground/15 p-0.5">
+		<div
+			class="inline-flex items-center gap-0.5 rounded-md bg-(--surface-muted) p-0.5 shadow-(--elevation-inset)"
+		>
 			{#if hasPromptStats || isLive}
 				{@render viewButton({
 					icon: BookOpenText,
@@ -224,6 +240,15 @@
 				value={formattedTime}
 			/>
 
+			{#if hasAgenticStats && agenticTimings!.totalMs !== undefined}
+				<ChatMessageStatisticsBadge
+					class="bg-transparent"
+					icon={Hourglass}
+					tooltipLabel="Total task time, from the prompt to the answer"
+					value={formattedAgenticTotalTime}
+				/>
+			{/if}
+
 			<ChatMessageStatisticsBadge
 				class="bg-transparent"
 				icon={Gauge}
@@ -269,7 +294,7 @@
 			<ChatMessageStatisticsBadge
 				class="bg-transparent"
 				icon={Clock}
-				tooltipLabel="Total time (LLM + tools)"
+				tooltipLabel="Total task time"
 				value={formattedAgenticTotalTime}
 			/>
 		{:else if hasPromptStats && (mode === ChatMessageStatisticsMode.READING || isSwitchable)}

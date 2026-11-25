@@ -10,16 +10,22 @@
  */
 
 import type { ListChangedHandlers } from '@modelcontextprotocol/sdk/types.js';
-import { browser } from '$app/environment';
-import { SETTINGS_KEYS } from '$lib/constants';
-import { CACHE, DEFAULT_MCP_CONFIG, MCP_RECONNECT, MCP_SERVER_ID_PREFIX } from '$lib/constants';
-import { ColorMode, HealthCheckStatus, MCPConnectionPhase, MCPRefType } from '$lib/enums';
-import { MCPService } from '$lib/services/mcp.service';
+import { SETTINGS_KEYS } from '#lib/constants/index.ts';
+import {
+	CACHE,
+	DEFAULT_MCP_CONFIG,
+	MCP_RECONNECT,
+	MCP_SERVER_ID_PREFIX
+} from '#lib/constants/index.ts';
+import { ColorMode, HealthCheckStatus, MCPConnectionPhase, MCPRefType } from '#lib/enums/index.ts';
+import { MCPService } from '#lib/services/mcp.service.ts';
+import { agenticMode } from '#lib/stores/agentic-mode.svelte.ts';
+import { serverStore } from '#lib/stores/llama-server.svelte.ts';
 // direct imports between stores, not via the barrel, to avoid circular deps
-import { MCPHealthCheckManager, type McpHealthHost } from '$lib/stores/mcp/health.svelte';
-import { mcpResourceStore } from '$lib/stores/mcp/resources.svelte';
-import { serverStore } from '$lib/stores/server.svelte';
-import { settingsStore } from '$lib/stores/settings/index.svelte';
+import { MCPHealthCheckManager, type McpHealthHost } from '#lib/stores/mcp/health.svelte.ts';
+import { mcpResourceStore } from '#lib/stores/mcp/resources.svelte.ts';
+import { settingsStore } from '#lib/stores/settings/index.svelte.ts';
+import type { DatabaseMessageExtraMcpResource } from '#lib/types/database.js';
 import type {
 	GetPromptResult,
 	HealthCheckParams,
@@ -36,9 +42,8 @@ import type {
 	ServerStatus,
 	Tool,
 	ToolExecutionResult
-} from '$lib/types';
-import type { DatabaseMessageExtraMcpResource } from '$lib/types/database';
-import type { SettingsConfigType } from '$lib/types/settings';
+} from '#lib/types/index.ts';
+import type { SettingsConfigType } from '#lib/types/settings.js';
 import {
 	buildProxiedIconUrl,
 	detectMcpTransportFromUrl,
@@ -47,7 +52,8 @@ import {
 	getMcpServerLabel,
 	parseMcpServerSettings,
 	uuid
-} from '$lib/utils';
+} from '#lib/utils/index.ts';
+import { browser } from '$app/env';
 import { mode } from 'mode-watcher';
 
 class MCPStore implements McpHealthHost {
@@ -367,7 +373,9 @@ class MCPStore implements McpHealthHost {
 
 				const newConnection = this.connections.get(serverName);
 
-				if (!newConnection) throw new Error(`Failed to reconnect to "${serverName}"`);
+				if (!newConnection) {
+					throw new Error(`Failed to reconnect to "${serverName}"`, { cause: error });
+				}
 
 				return MCPService.callTool(newConnection, { arguments: args, name: toolName }, signal);
 			}
@@ -684,6 +692,7 @@ class MCPStore implements McpHealthHost {
 	}
 
 	/**
+	 * @deprecated No caller any more: the tool call rows dropped their icons.
 	 * Resolve the favicon URL for an MCP server by one of its tool names.
 	 * Returns `null` if the tool is not provided by any configured MCP server,
 	 * or if the owning server has no icon to show.
@@ -728,6 +737,9 @@ class MCPStore implements McpHealthHost {
 	}
 
 	getServers(): MCPServerSettingsEntry[] {
+		// a plain chat keeps the saved servers and connects to none
+		if (!agenticMode.enabled) return [];
+
 		const raw = settingsStore.config.mcpServers;
 
 		// cache the parse: the config string rarely changes and getServers is
@@ -1343,7 +1355,9 @@ class MCPStore implements McpHealthHost {
 
 				return parsed as Record<string, unknown>;
 			} catch (error) {
-				throw new Error(`Failed to parse tool arguments as JSON: ${(error as Error).message}`);
+				throw new Error(`Failed to parse tool arguments as JSON: ${(error as Error).message}`, {
+					cause: error
+				});
 			}
 		}
 

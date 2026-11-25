@@ -1,5 +1,5 @@
 import { FAVICON_PATHS } from '../src/lib/constants/pwa.constants';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +10,8 @@ const require = createRequire(import.meta.url);
 
 /** The web favicons llama-brand draws for the UI, optically centred, keyed by the file they become. */
 export const BRAND_FAVICONS = {
-	[FAVICON_PATHS.SVG_DARK]: 'llama-brand/logo/svg/app/web/favicon-dark.svg',
-	[FAVICON_PATHS.SVG_LIGHT]: 'llama-brand/logo/svg/app/web/favicon.svg'
+	[FAVICON_PATHS.SVG_DARK]: '@ggml-org/llama-brand/logo/svg/app/web/favicon-dark.svg',
+	[FAVICON_PATHS.SVG_LIGHT]: '@ggml-org/llama-brand/logo/svg/app/web/favicon.svg'
 } as const;
 
 /**
@@ -23,5 +23,6 @@ export function writeBrandFavicons(outDir: string = DEFAULT_OUT_DIR): void {
 
 	for (const [fileName, specifier] of Object.entries(BRAND_FAVICONS)) {
 		copyFileSync(require.resolve(specifier), resolve(outDir, fileName));
+		chmodSync(resolve(outDir, fileName), 0o644);
 	}
 }

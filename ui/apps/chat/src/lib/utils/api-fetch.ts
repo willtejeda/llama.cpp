@@ -1,6 +1,10 @@
 import { getAuthHeaders, getJsonHeaders } from './api-headers';
-import { base } from '$app/paths';
-import { API_ABSOLUTE_URL_PROTOCOLS, ERROR_MESSAGES, HTTP_CODE_TO_STRING } from '$lib/constants';
+import { getServerBase, serverUrl } from './server-config';
+import {
+	API_ABSOLUTE_URL_PROTOCOLS,
+	ERROR_MESSAGES,
+	HTTP_CODE_TO_STRING
+} from '#lib/constants/index.ts';
 
 /**
  * API Fetch Utilities
@@ -62,8 +66,8 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 	const { authOnly = false, headers: customHeaders, ...fetchOptions } = options;
 	const baseHeaders = authOnly ? getAuthHeaders() : getJsonHeaders();
 	const headers = { ...baseHeaders, ...customHeaders };
-	// absolute URLs with an allowed protocol pass through untouched; relative paths get the base prefix
-	const url = API_ABSOLUTE_URL_PROTOCOLS.some((p) => path.startsWith(p)) ? path : `${base}${path}`;
+	// absolute URLs with an allowed protocol pass through untouched; relative paths go to the server
+	const url = API_ABSOLUTE_URL_PROTOCOLS.some((p) => path.startsWith(p)) ? path : serverUrl(path);
 
 	let response;
 
@@ -73,7 +77,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 			headers
 		});
 	} catch (e) {
-		throw new Error(beautifyNetworkError(e));
+		throw new Error(beautifyNetworkError(e), { cause: e });
 	}
 
 	if (!response.ok) {
@@ -106,7 +110,8 @@ export async function apiFetchWithParams<T>(
 	params: Record<string, string>,
 	options: ApiFetchOptions = {}
 ): Promise<T> {
-	const url = new URL(basePath, window.location.href);
+	// on the configured server when there is one, else relative to the page as before
+	const url = new URL(getServerBase() ? serverUrl(basePath) : basePath, window.location.href);
 
 	for (const [key, value] of Object.entries(params)) {
 		if (value !== undefined && value !== null) {

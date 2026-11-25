@@ -1,15 +1,4 @@
-export enum ColorMode {
-	DARK = 'dark',
-	LIGHT = 'light',
-	SYSTEM = 'system'
-}
-
-export enum TooltipSide {
-	BOTTOM = 'bottom',
-	LEFT = 'left',
-	RIGHT = 'right',
-	TOP = 'top'
-}
+export { ColorMode, MouseButton, PointerType, TooltipSide } from '@ggml-org/llama-ui/enums';
 
 /**
  * ScrollCarousel arrow placement.

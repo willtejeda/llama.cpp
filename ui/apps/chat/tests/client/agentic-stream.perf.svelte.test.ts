@@ -1,6 +1,6 @@
 // Tier 1 perf harness for the agentic thread.
 //
-// Drives ChatMessageAgenticContent the way the real streaming pipeline does:
+// Drives ChatMessageAgentTrace the way the real streaming pipeline does:
 // chat.svelte.ts -> conversations.svelte.ts:184 replaces the message object per
 // SSE chunk (`{ ...old, ...updates }`), which changes prop identity and cascades
 // through deriveAgenticSections into every tool-call block in the message.
@@ -13,9 +13,9 @@
 import { perfState } from './components/agentic-perf-state.svelte';
 import AgenticPerfWrapper from './components/AgenticPerfWrapper.svelte';
 import ChatMessagesPerfWrapper from './components/ChatMessagesPerfWrapper.svelte';
-import { MessageRole } from '$lib/enums';
-import { conversationsStore } from '$lib/stores/conversations/index.svelte';
-import type { DatabaseMessage } from '$lib/types';
+import { MessageRole } from '#lib/enums/index.ts';
+import { conversationsStore } from '#lib/stores/conversations/index.svelte.ts';
+import type { DatabaseMessage } from '#lib/types/index.ts';
 import { tick } from 'svelte';
 import { describe, it } from 'vitest';
 import { render } from 'vitest-browser-svelte';

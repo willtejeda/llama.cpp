@@ -1,7 +1,11 @@
 <script lang="ts">
 	import { ArrowUp, Edit, Trash2 } from '@lucide/svelte';
-	import { ActionIcon, ChatMessageEditForm, ChatMessageUserBubble } from '$lib/components/app';
-	import { useChatMessageEditContext } from '$lib/hooks/use-chat-message-edit-context.svelte';
+	import {
+		ActionIcon,
+		ChatMessageEditForm,
+		ChatMessageUserBubble
+	} from '#lib/components/app/index.ts';
+	import { useChatMessageEditContext } from '#lib/hooks/use-chat-message-edit-context.svelte.ts';
 
 	interface Props {
 		class?: string;
@@ -30,7 +34,7 @@
 
 <div
 	aria-label="Pending user message"
-	class="group flex flex-col items-end gap-3 transition-opacity hover:opacity-80 md:gap-2 {className} sticky bottom-32"
+	class="group flex flex-col items-end gap-3 transition-opacity hover:opacity-80 md:gap-2 {className}"
 	role="group"
 >
 	{#if editCtx.isEditing}
@@ -44,7 +48,7 @@
 			textColorClass="text-muted-foreground"
 		/>
 
-		<div class="max-w-[80%]">
+		<div class="max-w-4/5">
 			<div class="relative flex h-6 items-center justify-between">
 				<div class="right-0 flex items-center gap-2 opacity-100 transition-opacity">
 					<div

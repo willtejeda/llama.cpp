@@ -7,7 +7,7 @@
  * the chat flows.
  */
 
-import { browser } from '$app/environment';
+import { AGENTIC_ENABLED } from '#lib/constants/app.constants.ts';
 import {
 	buildBrowserInfoToolDefinition,
 	buildGetDatetimeToolDefinition,
@@ -18,7 +18,7 @@ import {
 	HOME_TILDE,
 	TOOL_GROUP_LABELS,
 	TOOL_SERVER_LABELS
-} from '$lib/constants';
+} from '#lib/constants/index.ts';
 import {
 	BuiltInTool,
 	GlobSearchType,
@@ -26,14 +26,16 @@ import {
 	JsonSchemaType,
 	ToolCallType,
 	ToolSource
-} from '$lib/enums';
-import { ToolsService } from '$lib/services/tools.service';
+} from '#lib/enums/index.ts';
+import { ToolsService } from '#lib/services/tools.service.ts';
+import { agenticMode } from '#lib/stores/agentic-mode.svelte.ts';
 // direct imports between stores, not via the barrel, to avoid circular deps
-import { mcpStore } from '$lib/stores/mcp/index.svelte';
-import { modelsStore } from '$lib/stores/models/index.svelte';
-import { settingsStore } from '$lib/stores/settings/index.svelte';
-import type { OpenAIToolDefinition, ToolEntry, ToolGroup } from '$lib/types';
-import { ApiError, buildSandboxToolDefinition } from '$lib/utils';
+import { mcpStore } from '#lib/stores/mcp/index.svelte.ts';
+import { modelsStore } from '#lib/stores/models/index.svelte.ts';
+import { settingsStore } from '#lib/stores/settings/index.svelte.ts';
+import type { OpenAIToolDefinition, ToolEntry, ToolGroup } from '#lib/types/index.ts';
+import { ApiError, buildSandboxToolDefinition } from '#lib/utils/index.ts';
+import { browser } from '$app/env';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 /** Stable selection identity for a tool, shared by the disabled set and the permission store */
@@ -58,6 +60,8 @@ class ToolsStore {
 
 	/** Canonical flat list of tool entries with source metadata and stable keys, deduped by key */
 	get allTools(): ToolEntry[] {
+		if (!agenticMode.enabled) return [];
+
 		const entries: ToolEntry[] = [];
 		const seen = new SvelteSet<string>();
 		const push = (entry: ToolEntry) => {
@@ -233,7 +237,7 @@ class ToolsStore {
 	}
 
 	async fetchServerTools(): Promise<void> {
-		if (this._loading) return;
+		if (!AGENTIC_ENABLED || this._loading) return;
 
 		this._loading = true;
 		this._error = null;
@@ -243,6 +247,7 @@ class ToolsStore {
 			const toolInfos = await ToolsService.list();
 
 			this._serverTools = toolInfos.map((info) => info.definition);
+			agenticMode.serverHasTools = toolInfos.length > 0;
 			this.cwdAwareTools = new SvelteSet(
 				toolInfos.filter((info) => info.uses_cwd).map((info) => info.tool)
 			);
@@ -258,6 +263,7 @@ class ToolsStore {
 			}
 		} finally {
 			this._loading = false;
+			agenticMode.serverToolsKnown = true;
 		}
 	}
 
@@ -430,6 +436,9 @@ class ToolsStore {
 	 */
 	async resolveServerHome(): Promise<string | null> {
 		if (this._serverHome !== undefined) return this._serverHome;
+
+		// a plain chat never calls the server's tools
+		if (!agenticMode.enabled) return null;
 
 		try {
 			const res = await ToolsService.executeToolRaw(BuiltInTool.SERVER_FILE_GLOB_SEARCH, {

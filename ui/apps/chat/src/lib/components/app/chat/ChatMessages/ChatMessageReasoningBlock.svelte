@@ -1,10 +1,9 @@
 <script lang="ts">
-	import { Lightbulb } from '@lucide/svelte';
-	import { CollapsibleContentBlock, MarkdownContent } from '$lib/components/app';
-	import { REASONING_SCROLL_AT_BOTTOM_THRESHOLD_PX } from '$lib/constants';
-	import { AgenticSectionType } from '$lib/enums';
-	import { settingsStore } from '$lib/stores';
-	import type { AgenticSection, DatabaseMessageExtra } from '$lib/types';
+	import { CollapsibleContentBlock, MarkdownContent } from '#lib/components/app/index.ts';
+	import { REASONING_SCROLL_AT_BOTTOM_THRESHOLD_PX } from '#lib/constants/index.ts';
+	import { AgenticSectionType } from '#lib/enums/index.ts';
+	import { settingsStore } from '#lib/stores/index.ts';
+	import type { AgenticSection, DatabaseMessageExtra } from '#lib/types/index.ts';
 
 	interface Props {
 		section: AgenticSection;
@@ -125,8 +124,7 @@
 
 <CollapsibleContentBlock
 	class="my-2"
-	icon={Lightbulb}
-	iconClass="h-3.5 w-3.5"
+	inlineChevron
 	{onToggle}
 	{open}
 	{shimmerTitle}
@@ -135,15 +133,14 @@
 >
 	<div
 		bind:this={scrollEl}
-		class:is-streaming={isPending}
-		class="reasoning-content"
+		class={['reasoning-content', isPending && 'is-streaming']}
 		onscroll={handleScrollEvent}
 	>
 		{#if currentConfig.renderThinkingAsMarkdown}
 			<MarkdownContent {attachments} class="text-muted-foreground" content={section.content} />
 		{:else}
 			<div
-				class="text-[13px] leading-relaxed wrap-break-word whitespace-pre-wrap text-muted-foreground"
+				class="text-body-sm leading-relaxed wrap-break-word whitespace-pre-wrap text-muted-foreground"
 			>
 				{section.content}
 			</div>
@@ -153,7 +150,8 @@
 
 <style>
 	.reasoning-content.is-streaming {
-		max-height: 28rem;
+		/* page zoom shrinks the viewport, keep the box inside it */
+		max-height: min(28rem, 50dvh);
 		overflow-y: auto;
 		scrollbar-gutter: stable;
 		padding-right: 0.25rem;

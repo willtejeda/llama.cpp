@@ -1,12 +1,18 @@
 <script lang="ts">
 	import '../app.css';
-	import { browser } from '$app/environment';
-	import { afterNavigate, goto } from '$app/navigation';
-	import { base } from '$app/paths';
-	import { page } from '$app/state';
-	import { GlassKey, MenuIcon, SidebarNavigation } from '$lib/components/app';
-	import { PwaMetaTags, PwaRefreshAlert } from '$lib/components/pwa';
-	import * as Tooltip from '$lib/components/ui/tooltip';
+	import * as Tooltip from '@ggml-org/llama-ui/ui/tooltip';
+	import {
+		DialogConfirmation,
+		DialogConversationSelection,
+		DialogImportConversationPreview,
+		DialogImportConversationsResult,
+		DialogSettingsImportPreview,
+		DropImportOverlay,
+		GlassKey,
+		MenuIcon,
+		SidebarNavigation
+	} from '#lib/components/app/index.ts';
+	import { PwaMetaTags, PwaRefreshAlert } from '#lib/components/pwa/index.ts';
 	import {
 		BOX_BORDER,
 		CHAT_FORM_CHROME_FADE_MS,
@@ -18,11 +24,12 @@
 		ROUTES,
 		SETTINGS_KEYS,
 		TOOLTIP_DELAY_DURATION
-	} from '$lib/constants';
-	import { useKeyboardShortcuts } from '$lib/hooks/use-keyboard-shortcuts.svelte';
-	import { usePwa } from '$lib/hooks/use-pwa.svelte';
-	import { useSidebarReveal } from '$lib/hooks/use-sidebar-reveal.svelte';
-	import { RouterService } from '$lib/services/router.service';
+	} from '#lib/constants/index.ts';
+	import { useDropImport } from '#lib/hooks/use-drop-import.svelte.ts';
+	import { useKeyboardShortcuts } from '#lib/hooks/use-keyboard-shortcuts.svelte.ts';
+	import { usePwa } from '#lib/hooks/use-pwa.svelte.ts';
+	import { useSidebarReveal } from '#lib/hooks/use-sidebar-reveal.svelte.ts';
+	import { RouterService } from '#lib/services/router.service.ts';
 	import {
 		chatStore,
 		conversationsStore,
@@ -34,15 +41,18 @@
 		tabsStore,
 		uiStore,
 		versionStore
-	} from '$lib/stores';
-	import { initStores } from '$lib/stores/init';
-	import { hapticTap } from '$lib/utils';
+	} from '#lib/stores/index.ts';
+	import { initStores } from '#lib/stores/init.ts';
+	import { hapticTap } from '#lib/utils/index.ts';
+	import { serverUrl } from '#lib/utils/server-config.ts';
+	import { browser } from '$app/env';
+	import { afterNavigate, goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { ModeWatcher } from 'mode-watcher';
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
 	import { fade } from 'svelte/transition';
 	import { Toaster } from 'svelte-sonner';
-	import { pwaAssetsHead } from 'virtual:pwa-assets/head';
 
 	let { children } = $props();
 
@@ -58,9 +68,8 @@
 		settingsStore.config[SETTINGS_KEYS.SHOW_BUILD_VERSION] as boolean
 	);
 
-	// Keep the hook object intact: destructuring needRefreshByStorage reads the getter once and freezes it
+	// Keep the hook object intact: destructuring would read its getters once and freeze them
 	const pwa = usePwa();
-	const { needRefresh, updateServiceWorker } = pwa;
 
 	function updateFavicon() {
 		const dark = deviceStore.systemTheme.isDark;
@@ -147,7 +156,15 @@
 	});
 
 	// the models page returns to wherever it was reached from, by any kind of navigation
-	afterNavigate(() => uiStore.rememberModelsReturnRoute());
+	afterNavigate(({ shallow, type }) => {
+		// clearing deep-link params is a shallow goto, not a visit to another page
+		if (shallow && type === 'goto') return;
+
+		uiStore.rememberModelsReturnRoute();
+	});
+
+	// Global drag-and-drop import (works on any route)
+	const dropImport = useDropImport();
 
 	// Global keyboard shortcuts
 	const { handleKeydown } = useKeyboardShortcuts({
@@ -181,7 +198,7 @@
 					[HEADERS.AUTHORIZATION]: `${HEADERS.BEARER}${apiKey.trim()}`
 				};
 
-				fetch(`${base}/props`, { headers })
+				fetch(serverUrl('/props'), { headers })
 					.then((response) => {
 						if (response.status === 401 || response.status === 403) {
 							window.location.reload();
@@ -236,12 +253,10 @@
 		}
 	});
 
-	// Inject custom CSS at runtime through an action on the head style node
-	// textContent keeps the value as text, never parsed as HTML
+	// Inject custom CSS at runtime through an attachment on the head style node, which reruns when
+	// the setting changes; textContent keeps the value as text, never parsed as HTML
 	function customCss(node: HTMLStyleElement) {
-		$effect(() => {
-			node.textContent = (settingsStore.config.customCss as string | undefined) ?? '';
-		});
+		node.textContent = (settingsStore.config.customCss as string | undefined) ?? '';
 	}
 
 	// Fetch router models when in router mode (for status and modalities)
@@ -309,23 +324,21 @@
 </script>
 
 <svelte:head>
-	{#if pwaAssetsHead.themeColor}
-		<meta content={pwaAssetsHead.themeColor.content} name="theme-color" />
-	{/if}
-
 	{#if settingsStore.config.customCss}
-		<style use:customCss></style>
+		<style {@attach customCss}></style>
 	{/if}
-
-	{#each pwaAssetsHead.links as link (link.href)}
-		<link {...link} />
-	{/each}
 
 	<PwaMetaTags />
 </svelte:head>
 
 <svelte:window bind:innerHeight bind:innerWidth onkeydown={handleKeydown} />
-<svelte:document onvisibilitychange={handleVisibilityChange} />
+<svelte:document
+	ondragenter={dropImport.dragHandlers.dragenter}
+	ondragleave={dropImport.dragHandlers.dragleave}
+	ondragover={dropImport.dragHandlers.dragover}
+	ondrop={dropImport.dragHandlers.drop}
+	onvisibilitychange={handleVisibilityChange}
+/>
 
 <Tooltip.Provider delayDuration={TOOLTIP_DELAY_DURATION}>
 	<!-- clip, not hide: the page slid aside for the phone sidebar must not widen the document,
@@ -348,7 +361,7 @@
 					(sidebarReveal.isRevealed ? 'min-h-[calc(100dvh+var(--safe-area-top))]' : 'min-h-dvh'),
 				deviceStore.isMobile &&
 					sidebarReveal.dragOffset === null &&
-					'transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]',
+					'transition-transform duration-300 ease-sheet',
 				// slid aside: nothing inside scrolls or takes a tap, which lands on the page itself and
 				// closes the sidebar; forced on every descendant, as the fixed bars opt back into events
 				sidebarReveal.isRevealed && 'touch-none [&_*]:pointer-events-none!'
@@ -378,14 +391,14 @@
 					<!-- under the chat form, which keeps its taps where the two overlap -->
 					<div
 						aria-hidden="true"
-						class="screen-bottom-edge sidebar-reveal-pin-bottom fixed inset-x-0 bottom-0 z-[6]"
+						class="screen-bottom-edge sidebar-reveal-pin-bottom fixed inset-x-0 bottom-0 z-6"
 					></div>
 				{/if}
 
 				<!-- over the content, under the chat form (see its wrapper in ChatScreen) -->
 				<div
 					aria-hidden="true"
-					class="screen-bottom-fade sidebar-reveal-pin-bottom pointer-events-none fixed inset-x-0 bottom-0 z-[5]"
+					class="screen-bottom-fade sidebar-reveal-pin-bottom pointer-events-none fixed inset-x-0 bottom-0 z-5"
 				></div>
 			{/if}
 
@@ -415,10 +428,10 @@
 				style:transform={revealTransform}
 				aria-hidden="true"
 				class={[
-					'pointer-events-none fixed inset-0 z-[25] rounded-[2.5rem]',
+					'pointer-events-none fixed inset-0 z-25 rounded-[2.5rem]',
 					'shadow-[-0.5rem_0_2rem_-0.25rem_rgb(0_0_0/0.12)] dark:shadow-[-0.5rem_0_2rem_-0.25rem_rgb(0_0_0/0.45)]',
 					sidebarReveal.dragOffset === null &&
-						'transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]',
+						'transition-[transform,opacity] duration-300 ease-sheet',
 					isRevealed
 						? 'opacity-100'
 						: 'opacity-0 [transition-delay:0ms,150ms] [transition-duration:300ms,150ms]'
@@ -431,7 +444,7 @@
 				class={[
 					'pointer-events-none fixed inset-0 z-20 overflow-hidden',
 					sidebarReveal.dragOffset === null &&
-						'transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]',
+						'transition-[transform,opacity] duration-300 ease-sheet',
 					// on close the corners hold until the page is nearly home, then fade
 					isRevealed
 						? 'opacity-100'
@@ -449,6 +462,55 @@
 
 	<Toaster closeButton richColors />
 
+	{#if dropImport.isDragOver}
+		<DropImportOverlay />
+	{/if}
+
+	<DialogConversationSelection
+		bind:open={dropImport.ui.showSelection}
+		conversations={dropImport.ui.availableConversations}
+		messageCountMap={dropImport.ui.selectionMessageCountMap}
+		mode="import"
+		onCancel={dropImport.cancelSelection}
+		onConfirm={dropImport.handleSelectionConfirm}
+	/>
+
+	<DialogSettingsImportPreview
+		bind:open={dropImport.ui.showSettingsPreview}
+		diff={dropImport.ui.settingsDiff}
+		onCancel={dropImport.cancelSettingsImport}
+		onConfirm={dropImport.confirmSettingsImport}
+	/>
+
+	<DialogImportConversationPreview
+		bind:open={dropImport.ui.showPreview}
+		messages={dropImport.ui.previewData?.messages}
+		onCancel={dropImport.cancelPreview}
+		onConfirm={dropImport.confirmImportSingle}
+	/>
+
+	<DialogConfirmation
+		bind:open={dropImport.ui.showOpenImported}
+		cancelText="Not now"
+		confirmText="Open"
+		description={dropImport.ui.openImported?.alreadyInLibrary
+			? `"${dropImport.ui.openImported.conv.name}" was already in your library. Open it now?`
+			: `"${dropImport.ui.openImported?.conv.name ?? ''}" is now in your library. Open it now?`}
+		onCancel={dropImport.cancelOpenImported}
+		onConfirm={dropImport.confirmOpenImported}
+		title={dropImport.ui.openImported?.alreadyInLibrary
+			? 'Already in your library'
+			: 'Conversation imported'}
+	/>
+
+	<DialogImportConversationsResult
+		bind:open={dropImport.ui.showOpenBulk}
+		conversations={dropImport.ui.importedConversations}
+		messageCountMap={dropImport.ui.bulkMessageCountMap}
+		onClose={dropImport.cancelBulk}
+		onOpen={dropImport.openConversation}
+	/>
+
 	<!-- a debug tool, kept with the tests and loaded on demand, so it stays out of the production bundle -->
 	{#if import.meta.env.DEV && import.meta.env.VITE_DEBUG}
 		{#await import('../../tests/debug/ViewportProbe.svelte') then { default: ViewportProbe }}
@@ -460,12 +522,8 @@
 <!-- PWA update prompt + version -->
 <div class="fixed right-4 bottom-4 z-9999 flex flex-col items-end gap-1">
 	{#if showBuildVersion && versionStore.build}
-		<span class="text-[10px] tabular-nums text-muted-foreground">{versionStore.build}</span>
+		<span class="text-caption-sm tabular-nums text-muted-foreground">{versionStore.build}</span>
 	{/if}
 
-	<PwaRefreshAlert
-		forceReload={pwa.needRefreshByStorage}
-		needRefresh={$needRefresh || pwa.needRefreshByStorage}
-		{updateServiceWorker}
-	/>
+	<PwaRefreshAlert needRefresh={pwa.needRefresh} updateServiceWorker={pwa.updateServiceWorker} />
 </div>

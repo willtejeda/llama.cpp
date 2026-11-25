@@ -1,21 +1,26 @@
 <script lang="ts">
+	import { Button, buttonVariants } from '@ggml-org/llama-ui/ui/button';
+	import * as ButtonGroup from '@ggml-org/llama-ui/ui/button-group';
+	import * as DropdownMenu from '@ggml-org/llama-ui/ui/dropdown-menu';
+	import { cn } from '@ggml-org/llama-ui/utils';
 	import { ChevronDown, ShieldQuestion } from '@lucide/svelte';
-	import { ChatMessageActionCard } from '$lib/components/app';
-	import { Button, buttonVariants } from '$lib/components/ui/button';
-	import * as ButtonGroup from '$lib/components/ui/button-group';
-	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { cn } from '$lib/components/ui/utils';
-	import { TOOL_SERVER_LABELS } from '$lib/constants';
-	import { ToolPermissionDecision, ToolSource } from '$lib/enums';
-	import { toolsStore } from '$lib/stores';
+	import { ChatMessageActionCard } from '#lib/components/app/index.ts';
+	import { TOOL_SERVER_LABELS } from '#lib/constants/index.ts';
+	import { ToolPermissionDecision, ToolSource } from '#lib/enums/index.ts';
+	import { toolsStore } from '#lib/stores/index.ts';
 
 	interface Props {
 		toolName: string;
 		serverLabel: string;
+		/**
+		 * The shell command the call would run, shown in full: the trace row may
+		 * show the model's own description of it, which is not what gets executed.
+		 */
+		command?: string;
 		onDecision: (decision: ToolPermissionDecision) => void;
 	}
 
-	let { onDecision, serverLabel, toolName }: Props = $props();
+	let { command, onDecision, serverLabel, toolName }: Props = $props();
 </script>
 
 <ChatMessageActionCard icon={ShieldQuestion}>
@@ -24,15 +29,17 @@
 			&nbsp;from <span class="font-semibold">{serverLabel}</span>{/if}?
 	{/snippet}
 
+	{#snippet detail()}
+		{#if command}
+			<pre
+				class="mb-3 max-h-40 overflow-auto rounded-md bg-(--surface-code) px-3 py-2 font-mono text-caption whitespace-pre-wrap break-words">{command}</pre>
+		{/if}
+	{/snippet}
+
 	{#snippet actions()}
 		<DropdownMenu.Root>
-			<ButtonGroup.Root class="overflow-hidden rounded-md shadow-sm">
-				<Button
-					class="!rounded-r-none !shadow-none"
-					onclick={() => onDecision(ToolPermissionDecision.ONCE)}
-					size="sm"
-					variant="secondary"
-				>
+			<ButtonGroup.Root>
+				<Button onclick={() => onDecision(ToolPermissionDecision.ONCE)} size="sm" variant="outline">
 					Allow once
 				</Button>
 
@@ -41,15 +48,15 @@
 				<DropdownMenu.Trigger
 					aria-label="More allow options"
 					class={cn(
-						buttonVariants({ size: 'sm', variant: 'secondary' }),
-						'inline-flex cursor-pointer items-center !rounded-l-none !shadow-none !px-2'
+						buttonVariants({ size: 'sm', variant: 'outline' }),
+						'inline-flex cursor-pointer items-center !px-2'
 					)}
 				>
-					<ChevronDown class="h-3.5 w-3.5" />
+					<ChevronDown class="size-icon-sm" />
 				</DropdownMenu.Trigger>
 			</ButtonGroup.Root>
 
-			<DropdownMenu.Content align="start" class="min-w-[8rem]">
+			<DropdownMenu.Content align="start" class="min-w-32">
 				<DropdownMenu.Item onclick={() => onDecision(ToolPermissionDecision.ALWAYS)}>
 					Always allow <pre>{toolName}</pre>
 					tool

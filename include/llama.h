@@ -466,6 +466,15 @@ extern "C" {
         const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
         const int32_t * prune_layers;                               // pointer to layer indices to prune
         size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
+        const struct llama_model_imatrix_data * activations;        // pointer to activations data
+        const struct llama_model_imatrix_data * statistics;         // pointer to statistics data
+        const char * const * stats_schema;                          // pointer to statistics schema names
+        float target_bpw;                                           // target bits per weight (bpw)
+        int64_t target_size;                                        // target file size in bytes
+        const char * state_file;                                    // pointer to bpw state file
+        const enum ggml_type * target_exclude;                      // pointer to excluded GGML_TYPEs
+        ggml_abort_callback abort_callback;                         // callback to abort quantization
+        void * abort_callback_data;                                 // pointer to user data for abort_callback
     } llama_model_quantize_params;
 
     typedef struct llama_logit_bias {
@@ -631,6 +640,17 @@ extern "C" {
 
     // Get metadata value as a string by index
     LLAMA_API int32_t llama_model_meta_val_str_by_index(const struct llama_model * model, int32_t i, char * buf, size_t buf_size);
+
+    // GGUF metadata arrays of strings
+    // currently, only these keys are support:
+    // - tokenizer.tts_dicts
+    // - tokenizer.tts_dict.*
+
+    // Get the number of elements, or -1 if there is no such array
+    LLAMA_API int32_t llama_model_meta_arr_n(const struct llama_model * model, const char * key);
+
+    // Get element i, owned by the model; nullptr if not found
+    LLAMA_API const char * llama_model_meta_arr_str(const struct llama_model * model, const char * key, int32_t i);
 
     // Get a string describing the model type
     LLAMA_API int32_t llama_model_desc(const struct llama_model * model, char * buf, size_t buf_size);

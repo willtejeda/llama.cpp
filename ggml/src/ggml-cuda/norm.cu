@@ -2,42 +2,61 @@
 #include "unary.cuh"
 #include <cstdint>
 
-template <int block_size>
+template <int block_size, bool do_multiply, bool do_add, bool grid_stride>
 static __global__ void norm_f32(
-        const float * x, float * dst, const int ncols, const int64_t stride_row, const int64_t stride_channel,
-        const int64_t stride_sample, const float eps) {
-    const int nrows     = gridDim.x;
-    const int nchannels = gridDim.y;
-
-    const int row       = blockIdx.x;
-    const int channel   = blockIdx.y;
-    const int sample    = blockIdx.z;
-    const int tid       = threadIdx.x;
-
-    x   += sample*stride_sample + channel*stride_channel + row*stride_row;
-    dst += ((sample*nchannels + channel)*nrows + row)*ncols;
-
-    float2 mean_var = make_float2(0.0f, 0.0f);
+        const float * x, float * dst, const int ncols, const int nchannels, const int nsamples,
+        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps,
+        const float * mul, const float * add) {
+    const int nrows = gridDim.x;
+    const int row   = blockIdx.x;
+    const int tid   = threadIdx.x;
 
     extern __shared__ float2 s_sum2[];
-
     ggml_cuda_pdl_sync();
-    for (int col = tid; col < ncols; col += block_size) {
-        const float xi = x[col];
-        mean_var.x += xi;
-        mean_var.y += xi * xi;
-    }
+    int sample = blockIdx.z;
+    do {
+        int channel = blockIdx.y;
+        do {
+            const float * xc   = x   + sample*stride_sample + channel*stride_channel + row*stride_row;
+            float       * dstc = dst + ((int64_t(sample)*nchannels + channel)*nrows + row)*ncols;
+            float2 mean_var = make_float2(0.0f, 0.0f);
 
-    // sum up partial sums
-    mean_var = block_reduce<block_reduce_method::SUM, block_size>(mean_var, s_sum2);
+            for (int col = tid; col < ncols; col += block_size) {
+                const float xi = xc[col];
+                mean_var.x += xi;
+                mean_var.y += xi * xi;
+            }
 
-    const float mean = mean_var.x / ncols;
-    const float var = mean_var.y / ncols - mean * mean;
-    const float inv_std = rsqrtf(var + eps);
+            mean_var = block_reduce<block_reduce_method::SUM, block_size>(mean_var, s_sum2);
+            const float mean = mean_var.x / ncols;
+            const float var = mean_var.y / ncols - mean * mean;
+            const float inv_std = rsqrtf(var + eps);
 
-    for (int col = tid; col < ncols; col += block_size) {
-        dst[col] = (x[col] - mean) * inv_std;
-    }
+            for (int col = tid; col < ncols; col += block_size) {
+                float v = (xc[col] - mean) * inv_std;
+                if constexpr (do_multiply) {
+                    v *= mul[col];
+                }
+                if constexpr (do_add) {
+                    // Match separate MUL and ADD nodes, including the intermediate rounding.
+                    v = __fadd_rn(v, add[col]);
+                }
+                dstc[col] = v;
+            }
+
+            if constexpr (!grid_stride) {
+                break;
+            }
+            if constexpr (grid_stride && block_size > WARP_SIZE) {
+                __syncthreads(); // s_sum2 is reused by the next reduce
+            }
+            channel += gridDim.y;
+        } while (channel < nchannels);
+        if constexpr (!grid_stride) {
+            break;
+        }
+        sample += gridDim.z;
+    } while (sample < nsamples);
 }
 
 template <int block_size>
@@ -466,16 +485,34 @@ static __global__ void l2_norm_f32(
     }
 }
 
+template <int block_size, bool do_multiply, bool do_add>
+static void norm_f32_launch(
+        const float * x, float * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
+        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps,
+        cudaStream_t stream, const float * mul, const float * add) {
+    const dim3 grid(nrows, MIN(nchannels, UINT16_MAX), MIN(nsamples, UINT16_MAX));
+    constexpr size_t shared = block_size > WARP_SIZE ? 32 * sizeof(float2) : 0;
+    if (nchannels > UINT16_MAX || nsamples > UINT16_MAX) {
+        norm_f32<block_size, do_multiply, do_add, true><<<grid, block_size, shared, stream>>>(
+            x, dst, ncols, nchannels, nsamples, stride_row, stride_channel, stride_sample, eps, mul, add);
+    } else {
+        norm_f32<block_size, do_multiply, do_add, false><<<grid, block_size, shared, stream>>>(
+            x, dst, ncols, nchannels, nsamples, stride_row, stride_channel, stride_sample, eps, mul, add);
+    }
+}
+
+template <bool do_multiply = false, bool do_add = false>
 static void norm_f32_cuda(
         const float * x, float * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
-        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps, cudaStream_t stream) {
-    const dim3 blocks_num(nrows, nchannels, nsamples);
+        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps,
+        cudaStream_t stream, const float * mul = nullptr, const float * add = nullptr) {
+    // Use the plain norm's reduction order for the affine variants as well.
     if (ncols < 1024) {
-        const dim3 block_dims(WARP_SIZE, 1, 1);
-        norm_f32<WARP_SIZE><<<blocks_num, block_dims, 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps);
+        norm_f32_launch<WARP_SIZE, do_multiply, do_add>(
+            x, dst, ncols, nrows, nchannels, nsamples, stride_row, stride_channel, stride_sample, eps, stream, mul, add);
     } else {
-        const dim3 block_dims(1024, 1, 1);
-        norm_f32<1024><<<blocks_num, block_dims, block_dims.x > WARP_SIZE ? 32 * sizeof(float2): 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps);
+        norm_f32_launch<1024, do_multiply, do_add>(
+            x, dst, ncols, nrows, nchannels, nsamples, stride_row, stride_channel, stride_sample, eps, stream, mul, add);
     }
 }
 
@@ -636,10 +673,10 @@ static void l2_norm_f32_cuda(
     }
 }
 
-void ggml_cuda_op_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * mul, ggml_tensor * add) {
     const ggml_tensor * src0 = dst->src[0];
     const float * src0_d = (const float *) src0->data;
-    float * dst_d = (float *) dst->data;
+    float *             dst_d  = (float *) (add ? add : mul ? mul : dst)->data;
     cudaStream_t stream = ctx.stream();
 
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
@@ -657,7 +694,19 @@ void ggml_cuda_op_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t s02 = nb02 / ts0;
     const int64_t s03 = nb03 / ts0;
 
-    norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+    if (mul) {
+        const ggml_tensor * weight   = mul->src[0] == dst ? mul->src[1] : mul->src[0];
+        const float *       weight_d = (const float *) weight->data;
+        if (add) {
+            const ggml_tensor * bias = add->src[0] == mul ? add->src[1] : add->src[0];
+            norm_f32_cuda<true, true>(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream, weight_d,
+                                      (const float *) bias->data);
+        } else {
+            norm_f32_cuda<true, false>(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream, weight_d);
+        }
+    } else {
+        norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+    }
 }
 
 void ggml_cuda_op_group_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

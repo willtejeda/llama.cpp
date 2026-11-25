@@ -1,20 +1,30 @@
 /**
  * Unified exports for all utility functions
- * Import utilities from '$lib/utils' for cleaner imports
+ * Import utilities from '#lib/utils/index.ts' for cleaner imports
  *
  * For browser-only utilities (pdf-processing, audio-recording, svg-to-png,
  * webp-to-png, process-uploaded-files, convert-files-to-extra), use:
- * import { ... } from '$lib/utils/browser-only'
+ * import { ... } from '#lib/utils/browser-only.ts'
  */
 
 // API utilities
 export { getAuthHeaders, getJsonHeaders, sanitizeHeaders } from './api-headers';
 export { ApiError, apiDelete, apiFetch, apiFetchWithParams, apiPost } from './api-fetch';
+export { withBase } from './base-path';
+export { getServerBase, loadServerConfig, serverUrl, setServerBase } from './server-config';
 export { validateApiKey } from './api-key-validation';
 
 // Attachment utilities
 export { getAttachmentDisplayItems, isMcpPrompt, isMcpResource } from './attachment-display';
-export { isTextFile, isImageFile, isPdfFile, isAudioFile, isVideoFile } from './attachment-type';
+export {
+	imageExtras,
+	isAudioFile,
+	isImageFile,
+	isMediaExtra,
+	isPdfFile,
+	isTextFile,
+	isVideoFile
+} from './attachment-type';
 
 // Textarea utilities
 export { default as autoResizeTextarea } from './autoresize-textarea';
@@ -32,6 +42,8 @@ export {
 // Code
 export {
 	highlightCode,
+	isHighlightLanguageLoaded,
+	loadHighlightLanguages,
 	detectIncompleteCodeBlock,
 	splitGluedClosingCodeFences,
 	trimCodePadding,
@@ -107,6 +119,7 @@ export {
 
 // IME utilities
 export { isIMEComposing } from './is-ime-composing';
+export { shouldTypeToFocus } from './type-to-focus';
 
 // LaTeX utilities
 export { maskInlineLaTeX, preprocessLaTeX } from './latex-protection';
@@ -273,6 +286,7 @@ export {
 	splitSearchSummaryList,
 	hasAgenticContent,
 	isSectionExpandedByDefault,
+	showsReplyStatus,
 	classifyToolResult,
 	classifyContinueIntent
 } from './agentic';
@@ -281,7 +295,7 @@ export {
 export { computeLineDiff, prefixFor, renderUnifiedDiff, type DiffLine } from './compute-line-diff';
 
 // Partial-incremental JSON parser for streaming tool arguments
-export { parsePartialJsonArgs } from './parse-partial-json-args';
+export { memoizeBounded } from './memoize-bounded';
 
 // `exec_shell_command` result parsing
 export { parseExecShellCommandError } from './parse-exec-shell-error';
@@ -333,6 +347,7 @@ export {
 // This module only carries the helpers that genuinely cross tool
 // boundaries (currently: parsing the tool-result blob into a JSON
 // object).
+export { parseToolCallShownArgOverrides, toolCallShownArg } from './tool-call-shown-arg';
 export { tryParseToolResultObject } from './tool-call-meta';
 
 // Per-tool UI metadata (label + icon) used by the tool-call chrome.
@@ -383,3 +398,15 @@ export { groupModelFamilies, modelFamilyKey, type ModelFamilyGroup } from './mod
 
 // Svelte actions
 export { nearViewport } from './near-viewport';
+
+// Voice: what a recording becomes for the conversation's model
+export {
+	type DictationModelInput,
+	dictationModelFor,
+	isTranscriptionOnlyModel,
+	resolveVoiceMode,
+	voiceModeLabel,
+	type VoiceModeInput,
+	voiceModelRole,
+	type VoiceModeResolution
+} from './voice-mode';

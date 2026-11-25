@@ -1,18 +1,27 @@
 <script lang="ts">
 	import ChatFormCurrentWorkingDirectoryChip from './ChatFormCurrentWorkingDirectoryChip.svelte';
 	import ChatFormCurrentWorkingDirectoryResultsList from './ChatFormCurrentWorkingDirectoryResultsList.svelte';
+	import { SearchInput } from '@ggml-org/llama-ui/app/forms';
+	import * as Drawer from '@ggml-org/llama-ui/ui/drawer';
+	import * as Popover from '@ggml-org/llama-ui/ui/popover';
 	import { FolderOpen, X } from '@lucide/svelte';
-	import SearchInput from '$lib/components/app/forms/SearchInput.svelte';
-	import * as Drawer from '$lib/components/ui/drawer';
-	import * as Popover from '$lib/components/ui/popover';
-	import { DEFAULT_MOBILE_BREAKPOINT, HOME_TILDE, SEARCH, UI_DATA_ATTRS } from '$lib/constants';
-	import { BuiltInTool, GlobSearchType, KeyboardKey, ToolSource } from '$lib/enums';
-	import { useDebouncedSearch } from '$lib/hooks/use-debounced-search.svelte';
-	import { usePickerNavigation } from '$lib/hooks/use-picker-navigation.svelte';
-	import { useScrollActiveRow } from '$lib/hooks/use-scroll-active-row.svelte';
-	import { ToolsService } from '$lib/services/tools.service';
-	import { conversationsStore, deviceStore, toolsStore } from '$lib/stores';
-	import { abbreviateHome, runGlobSearchWithChildren } from '$lib/utils';
+	import {
+		CHAT_FORM_CHIP_SPLIT,
+		CHAT_FORM_CHIP_TRANSITION_MS,
+		DEFAULT_MOBILE_BREAKPOINT,
+		HOME_TILDE,
+		SEARCH,
+		UI_DATA_ATTRS
+	} from '#lib/constants/index.ts';
+	import { BuiltInTool, GlobSearchType, KeyboardKey, ToolSource } from '#lib/enums/index.ts';
+	import { useDebouncedSearch } from '#lib/hooks/use-debounced-search.svelte.ts';
+	import { usePickerNavigation } from '#lib/hooks/use-picker-navigation.svelte.ts';
+	import { useScrollActiveRow } from '#lib/hooks/use-scroll-active-row.svelte.ts';
+	import { ToolsService } from '#lib/services/tools.service.ts';
+	import { conversationsStore, deviceStore, toolsStore } from '#lib/stores/index.ts';
+	import { abbreviateHome, runGlobSearchWithChildren } from '#lib/utils/index.ts';
+	import { page } from '$app/state';
+	import { cubicInOut } from 'svelte/easing';
 
 	// Microtask delay so the popover's focus scope tears down first.
 	const FOCUS_DELAY_MS = 0;
@@ -297,28 +306,69 @@
 		}
 	}
 
+	// the chip leaves with the directory it showed, instead of emptying while it fades out
+	let chipDirectory = $state<string | null>(null);
+
+	$effect(() => {
+		if (directory) chipDirectory = directory;
+	});
+
+	// A route change swaps the chip along with the whole form, which fades on its own: only a
+	// directory set or cleared on the same route animates. The effect runs before the DOM
+	// update that adds or removes the chip, so the transition sees the change as it starts.
+	const ROUTE_SWAP_WINDOW_MS = 100;
+	let routeChangedAt = -Infinity;
+
+	const routeJustChanged = () => performance.now() - routeChangedAt < ROUTE_SWAP_WINDOW_MS;
+
+	$effect.pre(() => {
+		void page.params.id;
+
+		routeChangedAt = performance.now();
+	});
+
+	// two steps: the box that holds the chip resizes to its full height first (the form below
+	// it follows), then the chip fades in; leaving runs the same curve backwards, so it fades
+	// out before the box closes
+	function chipTransition(node: Element) {
+		const height = node.getBoundingClientRect().height;
+
+		return {
+			css: (t: number) => {
+				const resize = cubicInOut(Math.min(t / CHAT_FORM_CHIP_SPLIT, 1));
+				const fade = Math.max((t - CHAT_FORM_CHIP_SPLIT) / (1 - CHAT_FORM_CHIP_SPLIT), 0);
+
+				return `overflow: hidden; height: ${height * resize}px; opacity: ${fade};`;
+			},
+			delay: 0,
+			duration: routeJustChanged() ? 0 : CHAT_FORM_CHIP_TRANSITION_MS
+		};
+	}
+
 	let innerWidth = $state(0);
 	const showTooltip = $derived(innerWidth > DEFAULT_MOBILE_BREAKPOINT);
 </script>
 
 {#if showChip}
-	<button
-		class={[
-			'justify-self-start flex min-w-0 w-auto items-center gap-1 mt-1.5 py-1 px-2 backdrop-blur-2xl rounded-md',
-			className
-		]}
-		{disabled}
-		onclick={onOpen}
-		type="button"
-	>
-		<ChatFormCurrentWorkingDirectoryChip
-			{directory}
+	<div transition:chipTransition class="grid">
+		<button
+			class={[
+				'justify-self-start flex min-w-0 w-auto items-center gap-1 mt-1.5 py-1 px-2 backdrop-blur-2xl rounded-md',
+				className
+			]}
 			{disabled}
-			{homeBase}
-			onClear={handleDismiss}
-			{showTooltip}
-		/>
-	</button>
+			onclick={onOpen}
+			type="button"
+		>
+			<ChatFormCurrentWorkingDirectoryChip
+				directory={directory ?? chipDirectory}
+				{disabled}
+				{homeBase}
+				onClear={handleDismiss}
+				{showTooltip}
+			/>
+		</button>
+	</div>
 {/if}
 
 <!-- the drawer's version is roomier: the header's inset, rows spaced for a finger and
@@ -334,7 +384,7 @@
 		/>
 
 		{#if !fileSearchEnabled}
-			<div class="px-2 py-1.5 text-sm text-muted-foreground">{searchUnavailableMessage}</div>
+			<div class="px-2 py-1.5 text-body-sm text-muted-foreground">{searchUnavailableMessage}</div>
 		{:else if query.trim() && (search.isSearching || queryResults.length > 0 || searchError)}
 			<ChatFormCurrentWorkingDirectoryResultsList
 				bind:container={listContainer}
@@ -353,8 +403,8 @@
 				class={[
 					'flex cursor-pointer items-center outline-hidden select-none hover:bg-accent hover:text-accent-foreground',
 					inDrawer
-						? 'mt-1 gap-2 rounded-lg px-2 py-2.5 text-[15px]'
-						: '-mt-1 gap-2 rounded-sm px-2 py-1.5 text-sm'
+						? 'mt-1 gap-2 rounded-lg px-2 py-2.5 text-body'
+						: '-mt-1 gap-2 rounded-sm px-2 py-1.5 text-body-sm'
 				]}
 				onclick={browseNative}
 				type="button"
@@ -370,8 +420,8 @@
 				class={[
 					'flex cursor-pointer items-center outline-hidden select-none hover:bg-accent hover:text-accent-foreground',
 					inDrawer
-						? 'gap-2 rounded-lg px-2 py-2.5 text-[15px]'
-						: 'gap-2 rounded-sm px-2 py-1.5 text-sm'
+						? 'gap-2 rounded-lg px-2 py-2.5 text-body'
+						: 'gap-2 rounded-sm px-2 py-1.5 text-body-sm'
 				]}
 				onclick={clearDirectory}
 				type="button"
@@ -388,7 +438,9 @@
 				class={['h-px', inDrawer ? 'my-1 bg-border/60' : '-mx-2 my-2 bg-border/20']}
 			></div>
 
-			<span class={['font-mono', inDrawer ? 'px-2 py-2 text-xs' : 'px-2 py-1.5 text-[10px]']}>
+			<span
+				class={['font-mono', inDrawer ? 'px-2 py-2 text-caption' : 'px-2 py-1.5 text-caption-sm']}
+			>
 				Searching in:
 
 				<span class="truncate text-muted-foreground/70" title={searchScope}

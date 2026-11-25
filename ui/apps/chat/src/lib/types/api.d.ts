@@ -1,5 +1,5 @@
 import type { ChatMessagePromptProgress, ChatRole } from './chat';
-import type { ModelSidecar } from '$lib/constants';
+import type { ModelSidecar } from '#lib/constants/index.ts';
 import type {
 	ContentPartType,
 	FileTypeAudio,
@@ -7,7 +7,7 @@ import type {
 	ServerModelsSseEventType,
 	ServerModelStatus,
 	ServerRole
-} from '$lib/enums';
+} from '#lib/enums/index.ts';
 
 export type AudioInputFormat = FileTypeAudio.WAV | FileTypeAudio.MP3;
 
@@ -305,6 +305,8 @@ export interface ApiLlamaCppServerProps {
 	webui_settings?: Record<string, string | number | boolean>;
 	ui_settings?: Record<string, string | number | boolean>;
 	cors_proxy_enabled?: boolean;
+	/** llama-server was started with `--ui-agent`: agent mode with no server tools and no proxy */
+	ui_agent?: boolean;
 }
 
 export interface ApiChatCompletionRequest {

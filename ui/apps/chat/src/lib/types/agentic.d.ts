@@ -15,8 +15,8 @@ import type {
 	DatabaseMessageExtraAudioFile,
 	DatabaseMessageExtraImageFile
 } from './database';
-import type { MessageRole, ToolSource } from '$lib/enums';
-import { AgenticSectionType, ContinueIntentKind, ToolCallType } from '$lib/enums';
+import type { MessageRole, ToolSource } from '#lib/enums/index.ts';
+import { AgenticSectionType, ContinueIntentKind, ToolCallType } from '#lib/enums/index.ts';
 
 /**
  * Agentic orchestration configuration.
@@ -68,6 +68,16 @@ export type AgenticChatCompletionRequest = Omit<ApiChatCompletionRequest, 'messa
 };
 
 /**
+ * The tool call the loop is asking to run. The id names that exact call, so a
+ * card can show what would run, not a same-named call sitting next to it.
+ */
+export interface PendingPermissionRequest {
+	serverLabel: string;
+	toolCallId: string;
+	toolName: string;
+}
+
+/**
  * Per-conversation agentic session state.
  * Enables parallel agentic flows across multiple chats.
  */
@@ -77,7 +87,7 @@ export interface AgenticSession {
 	totalToolCalls: number;
 	lastError: Error | null;
 	streamingToolCall: { name: string; arguments: string } | null;
-	pendingPermissionRequest: { toolName: string; serverLabel: string } | null;
+	pendingPermissionRequest: PendingPermissionRequest | null;
 	/** ID of the tool call whose output is currently being streamed back
 	 *  (e.g. exec_shell_command outputting to /tools?stream=true). Lets the
 	 *  matching tool renderer flip into live-update mode while chunks
@@ -89,6 +99,8 @@ export interface AgenticSession {
 	/** ID of the flow's first assistant message (the one the UI groups the
 	 *  whole run under); null when idle. */
 	flowRootMessageId: string | null;
+	/** When the running flow started (ms since epoch); null when idle. */
+	startedAt: number | null;
 }
 
 /**

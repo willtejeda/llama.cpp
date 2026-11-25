@@ -1788,7 +1788,7 @@ bool ggml_cuda_flash_attn_ext_gemm_supported(const ggml_tensor * dst) {
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
-    if (sinks) {
+    if (sinks || dst->src[5] || ggml_flash_attn_ext_has_indexed_bias(dst)) {
         return false;
     }
     if (Q->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {

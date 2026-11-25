@@ -58,7 +58,7 @@ export { default as CodeBlockActions } from './CodeBlockActions.svelte';
  * Inline SVG of the application logo. Accepts styling via the standard
  * `class` and `style` props and inherits color via `currentColor`.
  */
-export { default as Logo } from './Logo.svelte';
+export { Logo } from '@ggml-org/llama-ui/app/misc';
 
 /** Two-line menu glyph for the phone sidebar toggle, its lower line two thirds as long. */
 export { default as MenuIcon } from './MenuIcon.svelte';
@@ -70,4 +70,3 @@ export {
 	type GroupedListGroup,
 	GroupedListUnit
 } from './GroupedList.svelte';
-export { default as CollapsibleRegion } from './CollapsibleRegion.svelte';

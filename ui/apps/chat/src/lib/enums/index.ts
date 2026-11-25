@@ -10,6 +10,8 @@ export {
 	AgenticSectionType,
 	ContinueIntentKind,
 	DiffLineKind,
+	HarnessEventType,
+	InferenceEventType,
 	ToolResultKind,
 	ToolCallType
 } from './agentic.enums';
@@ -29,7 +31,7 @@ export {
 	FileMentionEntryType
 } from './chat.enums';
 
-export { SessionRecordType } from './conversation-import.enums';
+export { DataExportScope, SessionRecordType } from './conversation-import.enums';
 
 export { BooleanString } from './boolean-string.enums';
 
@@ -90,7 +92,7 @@ export {
 	ServerModelSource,
 	ServerModelStatus,
 	ServerModelsSseEventType
-} from './server.enums';
+} from './llama-server.enums';
 
 export { ParameterSource, SyncableParameterType, SettingsFieldType } from './settings.enums';
 
@@ -100,6 +102,8 @@ export {
 	HtmlInputType,
 	McpPromptVariant,
 	MenuKind,
+	MouseButton,
+	PointerType,
 	ScrollCarouselVariant,
 	SidebarAction,
 	SidebarSectionKind,
@@ -120,3 +124,5 @@ export {
 } from './tools.enums';
 
 export { SplashOrientation } from './splash.enums';
+
+export { ChatFormVoiceState, VoiceInputMode, VoiceMode, VoiceModelRole } from './voice.enums';

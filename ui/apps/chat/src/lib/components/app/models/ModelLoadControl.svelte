@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { ActionIcon } from '$lib/components/app';
-	import { ICON_CLASS_DEFAULT, MODEL_LOAD_ICONS } from '$lib/constants';
-	import { modelsStore } from '$lib/stores';
-	import type { ModelOption } from '$lib/types/models';
+	import { ActionIcon } from '#lib/components/app/index.ts';
+	import { ICON_CLASS_DEFAULT, MODEL_LOAD_ICONS } from '#lib/constants/index.ts';
+	import { modelsStore } from '#lib/stores/index.ts';
+	import type { ModelOption } from '#lib/types/models.js';
 
 	interface Props {
 		class?: string;
@@ -31,32 +31,54 @@
 
 <div class={['flex w-5 shrink-0 items-center justify-center', className]}>
 	{#if isLoading}
-		<MODEL_LOAD_ICONS.loading class="{ICON_CLASS_DEFAULT} animate-spin text-muted-foreground" />
+		<MODEL_LOAD_ICONS.loading
+			class="{ICON_CLASS_DEFAULT} animate-spin text-muted-foreground {showAction && revealOnHover
+				? 'group-hover:hidden [@media(pointer:coarse)]:hidden'
+				: ''}"
+		/>
+
+		<div
+			class={!showAction
+				? 'hidden'
+				: revealOnHover
+					? 'hidden group-hover:flex [@media(pointer:coarse)]:flex'
+					: 'flex'}
+		>
+			<ActionIcon
+				class="h-5 w-5 hover:text-foreground"
+				icon={MODEL_LOAD_ICONS.cancel}
+				iconSize="h-4 w-4"
+				onclick={() => modelsStore.status.cancelLoad(option.model)}
+				stopPropagationOnClick
+				tooltip="Cancel loading model"
+				tooltipAsTitle
+			/>
+		</div>
 	{:else}
 		<!-- the state dot is what the row shows at rest; the action takes its place on hover -->
 		{#if showAction && revealOnHover}
 			{#if isFailed}
 				<MODEL_LOAD_ICONS.failed
-					class="h-3.5 w-3.5 text-red-500 group-hover:hidden [@media(pointer:coarse)]:hidden"
+					class="size-icon-sm text-(--fill-danger) group-hover:hidden [@media(pointer:coarse)]:hidden"
 				/>
 			{:else}
 				<span
-					class="h-2 w-2 rounded-full group-hover:hidden [@media(pointer:coarse)]:hidden {isSleeping
-						? 'bg-orange-400'
+					class="size-2 rounded-full group-hover:hidden [@media(pointer:coarse)]:hidden {isSleeping
+						? 'status-lamp orb-warning'
 						: isLoaded
-							? 'bg-green-500'
+							? 'status-lamp orb-success'
 							: 'bg-muted-foreground/50'}"
 				></span>
 			{/if}
 		{:else}
 			{#if isFailed}
-				<MODEL_LOAD_ICONS.failed class="h-3.5 w-3.5 text-red-500" />
+				<MODEL_LOAD_ICONS.failed class="size-icon-sm text-(--fill-danger)" />
 			{:else}
 				<span
-					class="h-2 w-2 rounded-full {isSleeping
-						? 'bg-orange-400'
+					class="size-2 rounded-full {isSleeping
+						? 'status-lamp orb-warning'
 						: isLoaded
-							? 'bg-green-500'
+							? 'status-lamp orb-success'
 							: 'bg-muted-foreground/50'}"
 				></span>
 			{/if}
@@ -73,9 +95,9 @@
 		>
 			{#if isFailed}
 				<ActionIcon
-					class="h-5 w-5 text-red-500 hover:text-foreground"
+					class="size-icon-lg text-fg-danger hover:text-foreground"
 					icon={MODEL_LOAD_ICONS.retry}
-					iconSize="h-4 w-4"
+					iconSize="size-icon-md"
 					onclick={() => modelsStore.status.load(option.model)}
 					stopPropagationOnClick
 					tooltip="Retry loading model"
@@ -83,9 +105,9 @@
 				/>
 			{:else if isLoaded || isSleeping}
 				<ActionIcon
-					class="h-5 w-5 hover:text-foreground"
+					class="size-icon-lg hover:text-foreground"
 					icon={MODEL_LOAD_ICONS.unload}
-					iconSize="h-4 w-4"
+					iconSize="size-icon-md"
 					onclick={() => modelsStore.status.unload(option.model)}
 					stopPropagationOnClick
 					tooltip="Unload model"
@@ -93,9 +115,9 @@
 				/>
 			{:else}
 				<ActionIcon
-					class="h-5 w-5 hover:text-foreground"
+					class="size-icon-lg hover:text-foreground"
 					icon={MODEL_LOAD_ICONS.load}
-					iconSize="h-4 w-4"
+					iconSize="size-icon-md"
 					onclick={() => modelsStore.status.load(option.model)}
 					stopPropagationOnClick
 					tooltip="Load model"

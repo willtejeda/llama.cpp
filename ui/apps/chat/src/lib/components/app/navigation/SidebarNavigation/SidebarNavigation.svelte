@@ -1,7 +1,5 @@
 <script lang="ts">
 	import { PanelLeftClose, PanelLeftOpen, Search } from '@lucide/svelte';
-	import { goto } from '$app/navigation';
-	import { page } from '$app/state';
 	import {
 		ActionIcon,
 		DialogConversationDelete,
@@ -17,27 +15,36 @@
 		SidebarNavigationActions,
 		SidebarNavigationConversationList,
 		SidebarNavigationFooter
-	} from '$lib/components/app';
+	} from '#lib/components/app/index.ts';
 	import {
 		ROUTES,
 		SIDEBAR_ACTIONS_ITEMS,
 		SIDEBAR_COLLAPSE_WIDTH,
 		SIDEBAR_COLLAPSED_WIDTH,
 		SIDEBAR_CONTENT_FADE_MS,
-		SIDEBAR_FOOTER_ITEMS,
 		SIDEBAR_MAX_WIDTH,
 		SIDEBAR_MIN_WIDTH,
 		SIDEBAR_OVERSTRETCH_PX,
 		SIDEBAR_REVEAL_ACTION_DELAY_MS,
 		SIDEBAR_SETTLE_MS,
-		SIDEBAR_TOGGLE_MS
-	} from '$lib/constants';
-	import { SidebarAction, TooltipSide } from '$lib/enums';
-	import { useKeyboardShortcuts } from '$lib/hooks/use-keyboard-shortcuts.svelte';
-	import { useMarqueeSelection } from '$lib/hooks/use-marquee-selection.svelte';
-	import { RouterService } from '$lib/services/router.service';
-	import { chatStore, conversationsStore, deviceStore, settingsStore, uiStore } from '$lib/stores';
-	import { buildConversationTree, remToPx } from '$lib/utils';
+		SIDEBAR_TOGGLE_MS,
+		sidebarFooterItems
+	} from '#lib/constants/index.ts';
+	import { SidebarAction, TooltipSide } from '#lib/enums/index.ts';
+	import { useKeyboardShortcuts } from '#lib/hooks/use-keyboard-shortcuts.svelte.ts';
+	import { useMarqueeSelection } from '#lib/hooks/use-marquee-selection.svelte.ts';
+	import { RouterService } from '#lib/services/router.service.ts';
+	import { agenticMode } from '#lib/stores/agentic-mode.svelte.ts';
+	import {
+		chatStore,
+		conversationsStore,
+		deviceStore,
+		settingsStore,
+		uiStore
+	} from '#lib/stores/index.ts';
+	import { buildConversationTree, remToPx } from '#lib/utils/index.ts';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { tick } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import { fade } from 'svelte/transition';
@@ -570,7 +577,7 @@
 			isSettling && 'md:duration-300 md:ease-[cubic-bezier(0.34,1.56,0.64,1)]',
 			isDocked && !uiStore.isSidebarExpanded ? 'md:w-12' : 'md:w-(--sidebar-width)',
 			(uiStore.isSidebarExpanded || (isFloating && isPeeking)) &&
-				'md:bg-muted/60 md:backdrop-blur-xl max-md:shadow-md',
+				'md:sidebar-surface max-md:shadow-(--elevation-surface)',
 			isFloating && 'md:-mr-[calc(var(--sidebar-width)-3rem)]',
 			isStripHidden && 'md:pointer-events-none',
 			// on a phone the expanded chat form fills the screen, so the logo button over
@@ -615,7 +622,7 @@
 								: 'Go to start'}
 						class="pointer-events-auto size-10 rounded-full! md:size-9 {isStripHidden
 							? 'bg-transparent! hover:bg-transparent!'
-							: 'bg-muted/60 border border-border/20 backdrop-blur-sm bg-background! hover:bg-background! dark:bg-muted-foreground/15! dark:hover:bg-muted-foreground/15!'}"
+							: 'matte-key bg-card! hover:bg-card! dark:bg-muted-foreground/15! dark:hover:bg-muted-foreground/15!'}"
 						href={uiStore.isSidebarExpanded && !isLogoToggle ? ROUTES.START : undefined}
 						icon={isLogoToggle && logoHovered
 							? uiStore.isSidebarExpanded
@@ -639,7 +646,7 @@
 				{#if isOnMobile}
 					<ActionIcon
 						ariaLabel="Search"
-						class="bg-muted/60 border border-border/20 backdrop-blur-sm size-10 rounded-full! bg-background! hover:bg-background! dark:bg-muted-foreground/15! dark:hover:bg-muted-foreground/15!"
+						class="matte-key size-10 rounded-full! bg-card! hover:bg-card! dark:bg-muted-foreground/15! dark:hover:bg-muted-foreground/15!"
 						icon={Search}
 						iconSize="size-4.5"
 						onclick={() => handleSidebarAction(SidebarAction.SEARCH)}
@@ -662,7 +669,9 @@
 				<!-- a phone has no footer: its items join these -->
 				<SidebarNavigationActions
 					class="px-2 md:my-3"
-					items={isOnMobile ? [...SIDEBAR_ACTIONS_ITEMS, ...SIDEBAR_FOOTER_ITEMS] : undefined}
+					items={isOnMobile
+						? [...SIDEBAR_ACTIONS_ITEMS, ...sidebarFooterItems(agenticMode.enabled)]
+						: undefined}
 					onAction={handleSidebarAction}
 					onNavigate={navigateBehind}
 				/>

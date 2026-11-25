@@ -1,6 +1,10 @@
-import { FILE_TYPE_ICONS } from '$lib/constants';
-import { AttachmentAction, AttachmentItemEnabledWhen, AttachmentMenuItemId } from '$lib/enums';
-import type { AttachmentMenuItem } from '$lib/types';
+import { FILE_TYPE_ICONS } from '#lib/constants/index.ts';
+import {
+	AttachmentAction,
+	AttachmentItemEnabledWhen,
+	AttachmentMenuItemId
+} from '#lib/enums/index.ts';
+import type { AttachmentMenuItem } from '#lib/types/index.ts';
 
 /**
  * File attachment menu items shown in both the desktop dropdown and mobile sheet.
@@ -52,7 +56,10 @@ export const ATTACHMENT_FILE_ITEMS: AttachmentMenuItem[] = [
 	}
 ];
 
-export const ATTACHMENT_TOOLTIP_TEXT = 'Add files, prompts, tools or MCP Servers';
+/** What the add button offers: tools and MCP servers only with the agentic features on. */
+export function attachmentTooltipText(agentic: boolean): string {
+	return agentic ? 'Add files, prompts, tools or MCP Servers' : 'Add files or prompts';
+}
 
 /** Text shared by the add menu's two surfaces: the desktop dropdown and the mobile drawer. */
 export const ATTACHMENT_MENU_TEXT = {

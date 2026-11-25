@@ -1197,7 +1197,7 @@ static bool ggml_cuda_fattn_q4p_supported(const ggml_tensor * dst) {
         const char * s = getenv("GGML_CUDA_FA_Q4P");
         return !s || atoi(s) != 0;
     }();
-    if (!enabled) {
+    if (!enabled || dst->src[5] || ggml_flash_attn_ext_has_indexed_bias(dst)) {
         return false;
     }
     const ggml_tensor * Q     = dst->src[0];
