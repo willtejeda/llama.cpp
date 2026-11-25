@@ -2738,7 +2738,7 @@ static bool ggml_cuda_mul_mat_is_cublas_f16(ggml_backend_cuda_context & ctx, con
         if (ggml_cuda_should_use_mmvf(src0, cc, warp_size, ne11)) {
             return false;
         }
-        if (ggml_cuda_should_use_mmq_few(src0, src1, cc)) { // Ampere+ only, mirrors ggml_cuda_mul_mat
+        if (ggml_cuda_should_use_mmq_few(src0, src1, nullptr, cc)) {
             return false;
         }
         if (src0->ne[1] == 1 && ne11 > MMVF_MAX_BATCH_SIZE && dst->ne[2] == 1 && dst->ne[3] == 1 && src0->type == GGML_TYPE_F32) {
